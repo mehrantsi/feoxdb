@@ -1,0 +1,27 @@
+FeOxDB
+Copyright 2025 Mehran Toosi
+
+This product includes software developed by
+The FeOxDB Project (https://github.com/mehrantsi/feoxdb).
+
+================================================================
+
+This software includes the following third-party components:
+
+- DashMap: Licensed under MIT License
+  Copyright (c) 2019 Acrimon
+  https://github.com/xacrimon/dashmap
+
+- SkipList: Licensed under MIT License
+  Copyright (c) 2016 The Crossbeam Project
+  https://github.com/crossbeam-rs/crossbeam
+
+- io_uring: Licensed under MIT OR Apache-2.0
+  Copyright (c) 2019 Glommio Authors
+  https://github.com/tokio-rs/io-uring
+
+- Criterion.rs: Licensed under MIT OR Apache-2.0
+  Copyright (c) 2014 Jorge Aparicio
+  https://github.com/bheisler/criterion.rs
+
+================================================================

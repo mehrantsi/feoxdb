@@ -1,0 +1,27 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test data
+*.feox
+*.dat
+test_data/
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+*.prof

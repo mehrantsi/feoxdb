@@ -1,0 +1,102 @@
+name: Publish to crates.io
+
+# Manual trigger for publishing
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.1.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pre-publish-checks:
+    name: Pre-publish Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Check version in Cargo.toml
+        run: |
+          VERSION=$(grep "^version" Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$VERSION" != "${{ inputs.version }}" ]; then
+            echo "Version mismatch! Cargo.toml has $VERSION but you specified ${{ inputs.version }}"
+            exit 1
+          fi
+          echo "Version check passed: $VERSION"
+      
+      - name: Check formatting
+        run: cargo fmt -- --check
+      
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+      
+      - name: Run tests
+        run: cargo test --all-features
+      
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+      
+      - name: Package verification
+        run: |
+          cargo package --verbose
+          cargo package --list
+
+  publish:
+    name: Publish to crates.io
+    needs: pre-publish-checks
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Login to crates.io
+        run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Publish to crates.io (dry run)
+        run: cargo publish --dry-run
+      
+      - name: Publish to crates.io
+        run: cargo publish
+      
+      - name: Create git tag
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -a v${{ inputs.version }} -m "Release version ${{ inputs.version }}"
+          git push origin v${{ inputs.version }}
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ inputs.version }}
+          release_name: Release v${{ inputs.version }}
+          body: |
+            ## FeOxDB v${{ inputs.version }}
+            
+            Published to [crates.io](https://crates.io/crates/feoxdb/${{ inputs.version }})
+            
+            ### Installation
+            ```toml
+            [dependencies]
+            feoxdb = "${{ inputs.version }}"
+            ```
+            
+            ### Documentation
+            - [API Docs](https://docs.rs/feoxdb/${{ inputs.version }})
+            - [Repository](https://github.com/mehrantsi/feoxdb)
+          draft: false
+          prerelease: false

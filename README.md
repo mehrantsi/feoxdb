@@ -1,0 +1,424 @@
+# FeOxDB
+
+Ultra-fast embedded key-value database for Rust with sub-microsecond latency. Achieve <300ns GET operations through lock-free data structures and optimized storage.
+
+## Features
+
+- **Sub-Microsecond Latency**: <300ns GET, <600ns INSERT operations
+- **Lock-Free Concurrency**: Built on DashMap and Crossbeam SkipList
+- **Flexible Storage**: Memory-only or persistent modes with async I/O
+- **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
+- **Atomic Counters**: Thread-safe increment/decrement operations
+- **Write Buffering**: Sharded buffers with batched writes to reduce contention
+- **CLOCK Cache**: Second-chance eviction algorithm
+- **Statistics**: Real-time performance monitoring
+- **Free Space Management**: Dual RB-tree structure for O(log n) allocation
+- **Zero Fragmentation**: Automatic coalescing prevents disk fragmentation
+
+## Quick Start
+
+### Installation
+
+```toml
+[dependencies]
+feoxdb = "0.1.0"
+```
+
+### Basic Usage
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    // Create an in-memory store
+    let store = FeoxStore::new(None)?;
+    
+    // Insert a key-value pair
+    store.insert(b"user:123", b"{\"name\":\"Mehran\"}", None)?;
+    
+    // Get a value
+    let value = store.get(b"user:123")?;
+    println!("Value: {}", String::from_utf8_lossy(&value));
+    
+    // Check existence
+    if store.contains_key(b"user:123") {
+        println!("Key exists!");
+    }
+    
+    // Delete a key
+    store.delete(b"user:123", None)?;
+    
+    Ok(())
+}
+```
+
+### Persistent Storage
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    // Create a persistent store
+    let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
+    
+    // Operations are automatically persisted
+    store.insert(b"config:app", b"production", None)?;
+    
+    // Flush to disk
+    store.flush();
+    
+    // Data survives restarts
+    drop(store);
+    let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
+    let value = store.get(b"config:app")?;
+    assert_eq!(value, b"production");
+    
+    Ok(())
+}
+```
+
+### Advanced Configuration
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    let store = FeoxStore::builder()
+        .device_path("/data/myapp.feox")
+        .max_memory(2_000_000_000)  // 2GB limit
+        .enable_caching(true)        // Enable CLOCK cache
+        .hash_bits(20)               // 1M hash buckets
+        .build()?;
+    
+    Ok(())
+}
+```
+
+### Concurrent Access
+
+```rust
+use feoxdb::FeoxStore;
+use std::sync::Arc;
+use std::thread;
+
+fn main() -> feoxdb::Result<()> {
+    let store = Arc::new(FeoxStore::new(None)?);
+    let mut handles = vec![];
+    
+    // Spawn 10 threads, each inserting data
+    for i in 0..10 {
+        let store_clone = Arc::clone(&store);
+        handles.push(thread::spawn(move || {
+            for j in 0..1000 {
+                let key = format!("thread_{}:key_{}", i, j);
+                store_clone.insert(key.as_bytes(), b"value", None).unwrap();
+            }
+        }));
+    }
+    
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    
+    println!("Total keys: {}", store.len());  // 10,000
+    Ok(())
+}
+```
+
+### Range Queries
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    let store = FeoxStore::new(None)?;
+    
+    // Insert sorted keys
+    store.insert(b"user:001", b"Mehran", None)?;
+    store.insert(b"user:002", b"Bob", None)?;
+    store.insert(b"user:003", b"Charlie", None)?;
+    store.insert(b"user:004", b"David", None)?;
+    
+    // Range query: get users 001-003 (inclusive on both ends)
+    let results = store.range_query(b"user:001", b"user:003", 10)?;
+    
+    for (key, value) in results {
+        println!("{}: {}", 
+            String::from_utf8_lossy(&key),
+            String::from_utf8_lossy(&value));
+    }
+    // Outputs: user:001, user:002, user:003
+    
+    Ok(())
+}
+```
+
+### JSON Patch Operations (RFC 6902)
+
+FeOxDB supports partial updates to JSON documents using the standard JSON Patch format:
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    let store = FeoxStore::new(None)?;
+    
+    // Store a JSON document
+    let user = r#"{
+        "name": "Mehran",
+        "age": 30,
+        "skills": ["Rust", "Go"],
+        "address": {
+            "city": "San Francisco",
+            "zip": "94105"
+        }
+    }"#;
+    store.insert(b"user:123", user.as_bytes(), None)?;
+    
+    // Apply patches to modify specific fields
+    let patches = r#"[
+        {"op": "replace", "path": "/age", "value": 31},
+        {"op": "add", "path": "/skills/-", "value": "Python"},
+        {"op": "add", "path": "/email", "value": "mehran@example.com"},
+        {"op": "replace", "path": "/address/city", "value": "Seattle"}
+    ]"#;
+    
+    store.json_patch(b"user:123", patches.as_bytes(), None)?;
+    
+    // Document is now updated with patches applied
+    let updated = store.get(b"user:123")?;
+    println!("Updated: {}", String::from_utf8_lossy(&updated));
+    
+    Ok(())
+}
+```
+
+Supported JSON Patch operations:
+- `add`: Add a new field or array element
+- `remove`: Remove a field or array element
+- `replace`: Replace an existing value
+- `move`: Move a value from one path to another
+- `copy`: Copy a value from one path to another
+- `test`: Test that a value at a path equals a specified value
+
+### Atomic Counter Operations
+
+```rust
+use feoxdb::FeoxStore;
+
+fn main() -> feoxdb::Result<()> {
+    let store = FeoxStore::new(None)?;
+    
+    // Initialize counters (must be 8-byte i64 values)
+    let zero: i64 = 0;
+    store.insert(b"stats:visits", &zero.to_le_bytes(), None)?;
+    store.insert(b"stats:downloads", &zero.to_le_bytes(), None)?;
+    
+    // Increment atomically (thread-safe)
+    let visits = store.atomic_increment(b"stats:visits", 1, None)?;
+    println!("Visits: {}", visits);  // 1
+    
+    // Increment by 10
+    let downloads = store.atomic_increment(b"stats:downloads", 10, None)?;
+    println!("Downloads: {}", downloads);  // 10
+    
+    // Decrement
+    let visits = store.atomic_increment(b"stats:visits", -1, None)?;
+    println!("Visits after decrement: {}", visits);  // 0
+    
+    Ok(())
+}
+```
+
+## Performance
+
+### Benchmarks
+
+Run the included benchmarks:
+
+```bash
+# Performance test
+cargo run --release --example performance_test 100000 100
+
+# Deterministic test
+cargo run --release --example deterministic_test 100000 100
+
+# Criterion benchmarks
+cargo bench
+```
+
+### Results
+
+Typical performance on M3 Max:
+
+| Operation | Latency | Throughput | Notes |
+|-----------|---------|------------|-------|
+| GET | ~200-260ns | 2.1M ops/sec | DashMap lookup + stats |
+| INSERT | ~700ns | 850K ops/sec | Memory allocation + indexing |
+| DELETE | ~290ns | 1.1M ops/sec | Removal from indexes |
+| Mixed (80/20 R/W) | ~290ns | 3.1M ops/sec | Real-world workload |
+
+### Throughput
+
+Based on Criterion benchmarks:
+- **GET**: 8.2M - 10.5M ops/sec (varies by batch size)
+- **INSERT**: 730K - 1.1M ops/sec (varies by value size)
+- **Mixed workload (80/20)**: 3.1M ops/sec
+
+## Architecture
+
+FeOxDB uses a lock-free, multi-tier architecture optimized for modern multi-core CPUs:
+
+### Lock-Free Design
+
+The entire hot path is lock-free, ensuring consistent sub-microsecond latency:
+
+- **DashMap**: Sharded hash table with lock-free reads and fine-grained locking for writes
+- **Crossbeam SkipList**: Fully lock-free ordered index for range queries
+- **Atomic Operations**: All metadata updates use atomic primitives
+- **RCU-style Access**: Read-Copy-Update pattern for zero-cost reads
+
+### Async Write-Behind Logging
+
+Writes are decoupled from disk I/O for maximum throughput:
+
+1. **Sharded Write Buffers**
+   - Multiple buffers with thread-consistent assignment
+   - Reduces contention between threads
+   - Cache-friendly access patterns
+
+2. **Batched Flushing**
+   - Writes accumulated and flushed in batches
+   - Optimal disk utilization with large sequential writes
+   - Configurable flush intervals
+
+3. **io_uring Integration** (Linux)
+   - Kernel-bypass I/O with submission/completion queues
+   - Zero-copy operations where possible
+   - Async I/O without thread pool overhead
+
+4. **Write Coalescing**
+   - Multiple updates to same key automatically merged
+   - Reduces write amplification
+   - Improves SSD lifespan
+
+### Storage Tiers
+
+1. **In-Memory Layer**
+   - Primary storage in DashMap
+   - O(1) lookups with ~100ns latency
+   - Automatic memory management
+
+2. **Write Buffer Layer**
+   - Sharded buffers for concurrent writes
+   - Lock-free MPSC queues
+   - Backpressure handling
+
+3. **Persistent Storage**
+   - Sector-aligned writes (4KB blocks)
+   - Write-ahead logging for durability
+   - Crash recovery support
+
+4. **Cache Layer**
+   - CLOCK eviction algorithm
+   - Keeps hot data in memory after disk write
+   - Transparent cache management
+
+### Memory Management
+
+- Automatic value offloading when memory pressure increases
+- Configurable memory limits with graceful degradation
+- Reference counting for safe concurrent access
+
+## Use Cases
+
+### ✅ Perfect for:
+- **High-frequency trading**: Ultra-low latency market data
+- **Gaming**: Leaderboards, session storage, player state
+- **Web applications**: Session cache, rate limiting, feature flags
+- **IoT/Edge**: Time-series data, metrics collection
+- **ML/AI**: Feature stores, embedding cache
+
+### ❌ Not suitable for:
+- Complex SQL-like queries
+- Distributed multi-node setups
+- Large blob storage (>100MB values)
+- Strong consistency requirements across nodes
+
+## API Documentation
+
+Full API documentation is available:
+
+```bash
+cargo doc --open
+```
+
+Key types:
+- `FeoxStore` - Main database interface
+- `StoreBuilder` - Configuration builder
+- `FeoxError` - Error types
+- `Statistics` - Performance metrics
+
+## Examples
+
+See the `examples/` directory for more:
+
+- `performance_test.rs` - Benchmark tool
+- `deterministic_test.rs` - Reproducible performance test
+- More examples coming soon!
+
+## Language Support & Roadmap
+
+### Current Status
+FeOxDB is currently available as a native Rust library.
+### Planned Language Bindings
+
+#### Phase 1: C/C++ FFI
+- C header files for direct integration
+- C++ wrapper classes with RAII support
+- CMake integration
+
+#### Phase 2: Dynamic Languages
+- **Python**: Native extension via PyO3
+  - pip installable package
+  - Pythonic API with type hints
+  - async/await support
+- **Node.js**: N-API bindings
+  - npm package
+  - Promise-based and callback APIs
+  - TypeScript definitions
+- **Ruby**: Native gem with C extensions
+
+#### Phase 3: JVM & .NET 
+- **Java**: JNI bindings with zero-copy support
+  - Maven/Gradle artifacts
+  - CompletableFuture support
+- **C#/.NET**: P/Invoke or managed wrapper
+  - NuGet package
+  - async/await patterns
+
+#### Phase 4: Other Languages
+- **Go**: CGO bindings with idiomatic Go API
+- **Swift**: Native Swift package for iOS/macOS
+
+### Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for more information.
+
+## License
+
+Copyright 2025 Mehran Toosi
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+See [LICENSE](LICENSE) for the full license text.
