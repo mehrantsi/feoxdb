@@ -38,6 +38,7 @@ jobs:
       
       - name: Run benchmarks
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo bench --bench throughput
           echo "Benchmarks completed successfully"
         timeout-minutes: 15
