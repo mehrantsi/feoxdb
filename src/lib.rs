@@ -45,9 +45,12 @@
 //!
 //! FeOxDB trades full durability for extreme performance:
 //! - **Write-behind buffering**: Flushes every 100ms or when buffers fill (1024 entries or 16MB per shard)
-//! - **Worst-case data loss**: `100ms + 16MB / 4KB_random_write_QD1_throughput`
-//!   - Example (50MB/s SATA SSD): 100ms + 16MB / 50MB/s = 420ms
-//!   - Example (200MB/s NVMe): 100ms + 16MB / 200MB/s = 180ms
+//! - **Worst-case data loss**:
+//!   - **Time window**: `100ms + 16MB / 4KB_random_write_QD1_throughput`
+//!   - **Data at risk**: `16MB × num_shards` (e.g., 64MB for 4 shards, 128MB for 8 shards)
+//!   - Workers write in parallel, so time doesn't multiply with shards
+//!   - Example (50MB/s 4KB random QD1): 420ms window, up to 64MB at risk (4 shards)
+//!   - Example (200MB/s 4KB random QD1): 180ms window, up to 64MB at risk (4 shards)
 //! - **Memory-only mode**: No durability, maximum performance
 //! - **Explicit flush**: Call `store.flush()` to synchronously write all buffered data (blocks until fsync completes)
 //!
