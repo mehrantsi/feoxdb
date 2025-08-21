@@ -54,8 +54,12 @@ jobs:
           # Download previous benchmark results to use as baseline
           if curl -sfL https://mehrantsi.github.io/FeOxDB/benchmarks.tar.gz -o /tmp/benchmarks.tar.gz 2>/dev/null; then
             echo "Found previous benchmark results"
-            mkdir -p target/criterion
-            tar -xzf /tmp/benchmarks.tar.gz -C target/criterion
+            mkdir -p target
+            tar -xzf /tmp/benchmarks.tar.gz -C target/
+            
+            # Debug: show what we extracted
+            echo "Extracted structure:"
+            ls -la target/criterion/ | head -10 || echo "No criterion directory"
             
             # Rename all "new" directories to "base" for comparison
             find target/criterion -type d -name "new" | while read new_dir; do
