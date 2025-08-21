@@ -188,7 +188,7 @@ impl WriteBuffer {
         // Create per-worker channels
         let mut receivers = Vec::new();
         for _ in 0..actual_workers {
-            let (tx, rx) = bounded(100);
+            let (tx, rx) = bounded(2);
             self.worker_channels.push(tx);
             receivers.push(rx);
         }
