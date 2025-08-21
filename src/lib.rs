@@ -18,7 +18,7 @@
 //!
 //! ## Performance
 //!
-//! View the latest benchmark results at: <https://mehrantsi.github.io/FeOxDB/benchmarks.html>
+//! View the latest benchmark results at: <https://feoxdb.com/benchmarks.html>
 //!
 //! ## Features
 //!
