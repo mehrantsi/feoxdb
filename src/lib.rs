@@ -1,3 +1,7 @@
+//! <div align="center">
+//! <img src="https://raw.githubusercontent.com/mehrantsi/FeOxDB/main/logo.svg" alt="FeOxDB Logo" width="400">
+//! </div>
+//!
 //! # FeOxDB - High-Performance Embedded Key-Value Store
 //!
 // Copyright 2025 Mehran Toosi

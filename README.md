@@ -1,6 +1,8 @@
-# FeOxDB
+<div align="center">
+  <img src="logo.svg" alt="FeOxDB Logo" width="400">
 
-Ultra-fast embedded key-value database for Rust with sub-microsecond latency.
+  Ultra-fast, embedded key-value database for Rust with sub-microsecond latency.
+</div>
 
 [📚 Documentation](https://mehrantsi.github.io/FeOxDB/) | [📊 Benchmarks](https://mehrantsi.github.io/FeOxDB/benchmarks.html) | [💬 Issues](https://github.com/mehrantsi/FeOxDB/issues)
 

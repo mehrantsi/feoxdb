@@ -151,6 +151,9 @@ jobs:
             # Now archive the criterion directory (which only has "new" results)
             tar -czf public/benchmarks.tar.gz -C target criterion
             
+            # Copy logo to public directory
+            cp logo.svg public/logo.svg 2>/dev/null || true
+            
             # Create benchmarks index
             cat > public/benchmarks.html << 'EOF'
           <!DOCTYPE html>
@@ -183,15 +186,22 @@ jobs:
                       color: white; 
                       padding: 15px; 
                       margin: -40px -40px 40px -40px;
+                      display: flex;
+                      align-items: center;
+                      justify-content: space-between;
                   }
-                  .nav a { color: white; margin-right: 20px; }
+                  .nav-links a { color: white; margin-right: 20px; }
+                  .logo { height: 30px; }
               </style>
           </head>
           <body>
               <div class="nav">
-                  <a href="index.html">Documentation</a>
-                  <a href="benchmarks.html">Benchmarks</a>
-                  <a href="https://github.com/mehrantsi/feoxdb">GitHub</a>
+                  <img src="logo.svg" alt="FeOxDB" class="logo">
+                  <div class="nav-links">
+                      <a href="index.html">Documentation</a>
+                      <a href="benchmarks.html">Benchmarks</a>
+                      <a href="https://github.com/mehrantsi/feoxdb">GitHub</a>
+                  </div>
               </div>
               
               <h1>FeOxDB Performance Benchmarks</h1>
