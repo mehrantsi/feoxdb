@@ -46,22 +46,31 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo fmt -- --check
         if: matrix.rust == 'stable'
       
       - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo clippy --all-features -- -D warnings
         if: matrix.rust == 'stable'
       
       - name: Build
-        run: cargo build --verbose --all-features
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --verbose --all-features
       
       - name: Run tests
-        run: cargo test --verbose --all-features
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --verbose --all-features
         timeout-minutes: 10
       
       - name: Build examples
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo build --example deterministic_test --release
           cargo build --example persistence_test --release
       
@@ -90,7 +99,9 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
         timeout-minutes: 10
       
       - name: Upload coverage to Codecov
@@ -127,7 +138,9 @@ jobs:
       #   uses: dtolnay/rust-toolchain@stable
       
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
       

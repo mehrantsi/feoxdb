@@ -34,9 +34,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Verify package
-        run: cargo package --verbose
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo package --verbose
       
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

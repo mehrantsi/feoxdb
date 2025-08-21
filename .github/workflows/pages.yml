@@ -42,6 +42,7 @@ jobs:
       
       - name: Build documentation
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           cargo doc --no-deps --all-features
           echo '<meta http-equiv="refresh" content="0; url=feoxdb/index.html">' > target/doc/index.html
       
@@ -70,6 +71,7 @@ jobs:
       
       - name: Run benchmarks
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           # Run benchmarks normally to generate Criterion HTML reports
           cargo bench --bench latency || true
           cargo bench --bench throughput || true
