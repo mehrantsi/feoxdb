@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..1000 {
         let key = format!("key_{:04}", i);
         let value = format!("value_{:04}", i);
-        store.insert(key.as_bytes(), value.as_bytes(), None)?;
+        store.insert(key.as_bytes(), value.as_bytes())?;
     }
     let elapsed = start.elapsed();
     println!(
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Deleting keys key_0500 to key_0599...");
     for i in 500..600 {
         let key = format!("key_{:04}", i);
-        store.delete(key.as_bytes(), None)?;
+        store.delete(key.as_bytes())?;
     }
 
     // Get statistics

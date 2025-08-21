@@ -15,7 +15,7 @@ fn benchmark_get_latency(c: &mut Criterion) {
     for i in 0..10000 {
         let key = format!("key_{:06}", i);
         let value = vec![0u8; 64]; // Small value
-        store.insert(key.as_bytes(), &value, None).unwrap();
+        store.insert(key.as_bytes(), &value).unwrap();
     }
 
     // Test different key patterns
@@ -84,7 +84,7 @@ fn benchmark_insert_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     let key = format!("key_{:012}", i);
-                    black_box(store.insert(key.as_bytes(), &value, None).ok());
+                    black_box(store.insert(key.as_bytes(), &value).ok());
                     i += 1;
                 });
             },
@@ -105,7 +105,7 @@ fn benchmark_mixed_workload(c: &mut Criterion) {
     for i in 0..10000 {
         let key = format!("key_{:06}", i);
         let value = vec![0u8; 256];
-        store.insert(key.as_bytes(), &value, None).unwrap();
+        store.insert(key.as_bytes(), &value).unwrap();
     }
 
     group.bench_function("80_read_15_write_5_delete", |b| {
@@ -125,13 +125,13 @@ fn benchmark_mixed_workload(c: &mut Criterion) {
                 // Write
                 let key = format!("key_{:06}", next_key);
                 let value = vec![0u8; 256];
-                black_box(store.insert(key.as_bytes(), &value, None).ok());
+                black_box(store.insert(key.as_bytes(), &value).ok());
                 next_key += 1;
             } else {
                 // Delete
                 let idx = rng.random_range(0..10000);
                 let key = format!("key_{:06}", idx);
-                black_box(store.delete(key.as_bytes(), None).ok());
+                black_box(store.delete(key.as_bytes()).ok());
             }
         });
     });
@@ -152,13 +152,13 @@ fn benchmark_delete_latency(c: &mut Criterion) {
         for i in 0..100000 {
             let key = format!("key_{:08}", i);
             let value = vec![0u8; 64];
-            store.insert(key.as_bytes(), &value, None).unwrap();
+            store.insert(key.as_bytes(), &value).unwrap();
         }
 
         let mut i = 0;
         b.iter(|| {
             let key = format!("key_{:08}", i);
-            black_box(store.delete(key.as_bytes(), None).ok());
+            black_box(store.delete(key.as_bytes()).ok());
             i = (i + 1) % 100000;
         });
     });

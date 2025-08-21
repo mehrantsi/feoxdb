@@ -38,7 +38,7 @@ fn main() -> Result<()> {
 
         for (key, value) in &test_data {
             let key_bytes = format!("test:{}", key).into_bytes();
-            store.insert(&key_bytes, value, None)?;
+            store.insert(&key_bytes, value)?;
             println!("  ✓ Inserted '{}' ({} bytes)", key, value.len());
         }
 
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         for i in 0..10 {
             let key = format!("range:{:03}", i);
             let value = format!("value_{}", i);
-            store.insert(key.as_bytes(), value.as_bytes(), None)?;
+            store.insert(key.as_bytes(), value.as_bytes())?;
         }
         println!("  ✓ Inserted 10 range query test keys");
 
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
 
         // Test atomic counter persistence
         println!("\n>>> Testing atomic counter persistence...");
-        let counter_value = store.atomic_increment(b"test:counter", 8, None)?;
+        let counter_value = store.atomic_increment(b"test:counter", 8)?;
         assert_eq!(counter_value, 50); // 42 + 8
         println!("  ✓ Counter incremented from 42 to 50");
 
@@ -152,7 +152,7 @@ fn main() -> Result<()> {
         println!("\n>>> Adding new data in Phase 2...");
         for (key, value) in &phase2_data {
             let key_bytes = format!("test:{}", key).into_bytes();
-            store.insert(&key_bytes, value, None)?;
+            store.insert(&key_bytes, value)?;
             println!(
                 "  ✓ Inserted {} ({} bytes)",
                 key.replace("phase2_", ""),
@@ -164,7 +164,7 @@ fn main() -> Result<()> {
         for i in 10..20 {
             let key = format!("range:{:03}", i);
             let value = format!("phase2_value_{}", i);
-            store.insert(key.as_bytes(), value.as_bytes(), None)?;
+            store.insert(key.as_bytes(), value.as_bytes())?;
         }
         println!("  ✓ Inserted 10 more range query test keys");
 
@@ -283,8 +283,8 @@ fn main() -> Result<()> {
 
         // Test deletion to ensure free space management works
         println!("\n>>> Testing deletion and free space management...");
-        store.delete(b"test:tiny", None)?;
-        store.delete(b"test:phase2_small", None)?;
+        store.delete(b"test:tiny")?;
+        store.delete(b"test:phase2_small")?;
         println!("  ✓ Deleted keys from both phases");
 
         assert!(!store.contains_key(b"test:tiny"));

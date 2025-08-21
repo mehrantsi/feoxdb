@@ -273,7 +273,7 @@ fn main() -> Result<()> {
         let value = generate_value(value_size);
 
         let op_start = Instant::now();
-        let success = store.insert(&key, &value, None).is_ok();
+        let success = store.insert(&key, &value).is_ok();
         let latency_ns = op_start.elapsed().as_nanos() as u64;
 
         insert_stats.record(latency_ns, success);
@@ -325,7 +325,7 @@ fn main() -> Result<()> {
         let key = generate_key(i);
 
         let op_start = Instant::now();
-        let success = store.delete(&key, None).is_ok();
+        let success = store.delete(&key).is_ok();
         let latency_ns = op_start.elapsed().as_nanos() as u64;
 
         delete_stats.record(latency_ns, success);

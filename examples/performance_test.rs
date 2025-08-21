@@ -139,7 +139,7 @@ fn run_workload(
         } else {
             // Write operation
             let value = generate_value(config.value_size);
-            store.insert(&key, &value, None).is_ok()
+            store.insert(&key, &value).is_ok()
         };
         let latency_ns = start.elapsed().as_nanos() as usize;
 
@@ -240,7 +240,7 @@ fn main() -> Result<()> {
     for i in 0..prepop_count {
         let key = generate_key(i);
         let value = generate_value(value_size);
-        store.insert(&key, &value, None)?;
+        store.insert(&key, &value)?;
 
         if i % 1000 == 0 {
             print!("\r{}Pre-populated:{} {} keys", ANSI_CYAN, ANSI_RESET, i);

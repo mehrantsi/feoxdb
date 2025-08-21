@@ -62,14 +62,14 @@
 //! let store = FeoxStore::new(None)?;
 //!
 //! // Insert a key-value pair
-//! store.insert(b"key", b"value", None)?;
+//! store.insert(b"key", b"value")?;
 //!
 //! // Retrieve the value
 //! let value = store.get(b"key")?;
 //! assert_eq!(value, b"value");
 //!
 //! // Delete the key
-//! store.delete(b"key", None)?;
+//! store.delete(b"key")?;
 //! # Ok(())
 //! # }
 //! ```
@@ -83,7 +83,7 @@
 //! let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
 //!
 //! // Operations are automatically persisted
-//! store.insert(b"persistent_key", b"persistent_value", None)?;
+//! store.insert(b"persistent_key", b"persistent_value")?;
 //!
 //! // Flush to disk
 //! store.flush();
@@ -112,9 +112,9 @@
 //! let store = FeoxStore::new(None)?;
 //!
 //! // Insert sorted keys
-//! store.insert(b"user:001", b"Mehran", None)?;
-//! store.insert(b"user:002", b"Bob", None)?;
-//! store.insert(b"user:003", b"Charlie", None)?;
+//! store.insert(b"user:001", b"Mehran")?;
+//! store.insert(b"user:002", b"Bob")?;
+//! store.insert(b"user:003", b"Charlie")?;
 //!
 //! // Range query (both start and end are inclusive)
 //! let results = store.range_query(b"user:001", b"user:003", 10)?;
@@ -143,7 +143,7 @@
 //!     "age": 30,
 //!     "scores": [85, 90, 95]
 //! }"#;
-//! store.insert(b"user:123", initial_json, None)?;
+//! store.insert(b"user:123", initial_json)?;
 //!
 //! // Apply a JSON Patch to modify specific fields
 //! let patch = br#"[
@@ -152,7 +152,7 @@
 //!     {"op": "add", "path": "/scores/-", "value": 100}
 //! ]"#;
 //!
-//! store.json_patch(b"user:123", patch, None)?;
+//! store.json_patch(b"user:123", patch)?;
 //!
 //! // The document is now updated with the patches applied
 //! let updated = store.get(b"user:123")?;
@@ -172,18 +172,18 @@
 //!
 //! // Initialize a counter (must be 8-byte i64 value)
 //! let zero: i64 = 0;
-//! store.insert(b"counter:visits", &zero.to_le_bytes(), None)?;
+//! store.insert(b"counter:visits", &zero.to_le_bytes())?;
 //!
 //! // Increment atomically
-//! let new_value = store.atomic_increment(b"counter:visits", 1, None)?;
+//! let new_value = store.atomic_increment(b"counter:visits", 1)?;
 //! assert_eq!(new_value, 1);
 //!
 //! // Increment by 5
-//! let new_value = store.atomic_increment(b"counter:visits", 5, None)?;
+//! let new_value = store.atomic_increment(b"counter:visits", 5)?;
 //! assert_eq!(new_value, 6);
 //!
 //! // Decrement by 2  
-//! let new_value = store.atomic_increment(b"counter:visits", -2, None)?;
+//! let new_value = store.atomic_increment(b"counter:visits", -2)?;
 //! assert_eq!(new_value, 4);
 //! # Ok(())
 //! # }
@@ -198,13 +198,13 @@
 //! # fn main() -> feoxdb::Result<()> {
 //! # let store = FeoxStore::new(None)?;
 //! // Insert with explicit timestamp
-//! store.insert(b"key", b"value_v1", Some(100))?;
+//! store.insert_with_timestamp(b"key", b"value_v1", Some(100))?;
 //!
 //! // Update with higher timestamp succeeds
-//! store.insert(b"key", b"value_v2", Some(200))?;
+//! store.insert_with_timestamp(b"key", b"value_v2", Some(200))?;
 //!
 //! // Update with lower timestamp fails
-//! let result = store.insert(b"key", b"value_v3", Some(150));
+//! let result = store.insert_with_timestamp(b"key", b"value_v3", Some(150));
 //! assert!(result.is_err());  // OlderTimestamp error
 //! # Ok(())
 //! # }
@@ -280,7 +280,7 @@
 //!     let store_clone = Arc::clone(&store);
 //!     handles.push(thread::spawn(move || {
 //!         let key = format!("key_{}", i);
-//!         store_clone.insert(key.as_bytes(), b"value", None).unwrap();
+//!         store_clone.insert(key.as_bytes(), b"value").unwrap();
 //!     }));
 //! }
 //!

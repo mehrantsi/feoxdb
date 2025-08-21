@@ -56,7 +56,7 @@ fn main() -> feoxdb::Result<()> {
     let store = FeoxStore::new(None)?;
     
     // Insert a key-value pair
-    store.insert(b"user:123", b"{\"name\":\"Mehran\"}", None)?;
+    store.insert(b"user:123", b"{\"name\":\"Mehran\"}")?;
     
     // Get a value
     let value = store.get(b"user:123")?;
@@ -68,7 +68,7 @@ fn main() -> feoxdb::Result<()> {
     }
     
     // Delete a key
-    store.delete(b"user:123", None)?;
+    store.delete(b"user:123")?;
     
     Ok(())
 }
@@ -84,7 +84,7 @@ fn main() -> feoxdb::Result<()> {
     let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
     
     // Operations are automatically persisted
-    store.insert(b"config:app", b"production", None)?;
+    store.insert(b"config:app", b"production")?;
     
     // Flush to disk
     store.flush();
@@ -156,10 +156,10 @@ fn main() -> feoxdb::Result<()> {
     let store = FeoxStore::new(None)?;
     
     // Insert sorted keys
-    store.insert(b"user:001", b"Mehran", None)?;
-    store.insert(b"user:002", b"Bob", None)?;
-    store.insert(b"user:003", b"Charlie", None)?;
-    store.insert(b"user:004", b"David", None)?;
+    store.insert(b"user:001", b"Mehran")?;
+    store.insert(b"user:002", b"Bob")?;
+    store.insert(b"user:003", b"Charlie")?;
+    store.insert(b"user:004", b"David")?;
     
     // Range query: get users 001-003 (inclusive on both ends)
     let results = store.range_query(b"user:001", b"user:003", 10)?;
@@ -195,7 +195,7 @@ fn main() -> feoxdb::Result<()> {
             "zip": "94105"
         }
     }"#;
-    store.insert(b"user:123", user.as_bytes(), None)?;
+    store.insert(b"user:123", user.as_bytes())?;
     
     // Apply patches to modify specific fields
     let patches = r#"[
@@ -205,7 +205,7 @@ fn main() -> feoxdb::Result<()> {
         {"op": "replace", "path": "/address/city", "value": "Seattle"}
     ]"#;
     
-    store.json_patch(b"user:123", patches.as_bytes(), None)?;
+    store.json_patch(b"user:123", patches.as_bytes())?;
     
     // Document is now updated with patches applied
     let updated = store.get(b"user:123")?;
@@ -233,19 +233,19 @@ fn main() -> feoxdb::Result<()> {
     
     // Initialize counters (must be 8-byte i64 values)
     let zero: i64 = 0;
-    store.insert(b"stats:visits", &zero.to_le_bytes(), None)?;
-    store.insert(b"stats:downloads", &zero.to_le_bytes(), None)?;
+    store.insert(b"stats:visits", &zero.to_le_bytes())?;
+    store.insert(b"stats:downloads", &zero.to_le_bytes())?;
     
     // Increment atomically (thread-safe)
-    let visits = store.atomic_increment(b"stats:visits", 1, None)?;
+    let visits = store.atomic_increment(b"stats:visits", 1)?;
     println!("Visits: {}", visits);  // 1
     
     // Increment by 10
-    let downloads = store.atomic_increment(b"stats:downloads", 10, None)?;
+    let downloads = store.atomic_increment(b"stats:downloads", 10)?;
     println!("Downloads: {}", downloads);  // 10
     
     // Decrement
-    let visits = store.atomic_increment(b"stats:visits", -1, None)?;
+    let visits = store.atomic_increment(b"stats:visits", -1)?;
     println!("Visits after decrement: {}", visits);  // 0
     
     Ok(())
@@ -346,12 +346,6 @@ Writes are decoupled from disk I/O for maximum throughput:
    - Keeps hot data in memory after disk write
    - Transparent cache management
 
-### Memory Management
-
-- Automatic value offloading when memory pressure increases
-- Configurable memory limits with graceful degradation
-- Reference counting for safe concurrent access
-
 ## API Documentation
 
 Full API documentation is available:
@@ -372,41 +366,6 @@ See the `examples/` directory for more:
 
 - `performance_test.rs` - Benchmark tool
 - `deterministic_test.rs` - Reproducible performance test
-- More examples coming soon!
-
-## Language Support & Roadmap
-
-### Current Status
-FeOxDB is currently available as a native Rust library.
-### Planned Language Bindings
-
-#### Phase 1: C/C++ FFI
-- C header files for direct integration
-- C++ wrapper classes with RAII support
-- CMake integration
-
-#### Phase 2: Dynamic Languages
-- **Python**: Native extension via PyO3
-  - pip installable package
-  - Pythonic API with type hints
-  - async/await support
-- **Node.js**: N-API bindings
-  - npm package
-  - Promise-based and callback APIs
-  - TypeScript definitions
-- **Ruby**: Native gem with C extensions
-
-#### Phase 3: JVM & .NET 
-- **Java**: JNI bindings with zero-copy support
-  - Maven/Gradle artifacts
-  - CompletableFuture support
-- **C#/.NET**: P/Invoke or managed wrapper
-  - NuGet package
-  - async/await patterns
-
-#### Phase 4: Other Languages
-- **Go**: CGO bindings with idiomatic Go API
-- **Swift**: Native Swift package for iOS/macOS
 
 ### Contributing
 

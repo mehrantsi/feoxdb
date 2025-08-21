@@ -321,7 +321,7 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// # let store = FeoxStore::new(None)?;
-    /// store.insert(b"user:123", b"{\"name\":\"Mehran\"}", None)?;
+    /// store.insert(b"user:123", b"{\"name\":\"Mehran\"}")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -330,7 +330,30 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~800ns
     /// * Persistent mode: ~1µs (buffered write)
-    pub fn insert(&self, key: &[u8], value: &[u8], timestamp: Option<u64>) -> Result<()> {
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.insert_with_timestamp(key, value, None)
+    }
+
+    /// Insert or update a key-value pair with explicit timestamp.
+    ///
+    /// This is the advanced version that allows manual timestamp control for
+    /// conflict resolution. Most users should use `insert()` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert (max 65KB)
+    /// * `value` - The value to store (max 4GB)
+    /// * `timestamp` - Optional timestamp for conflict resolution. If `None`, uses current time.
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn insert_with_timestamp(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        timestamp: Option<u64>,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
         let timestamp = match timestamp {
             Some(0) | None => self.get_timestamp(),
@@ -425,7 +448,7 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// # let store = FeoxStore::new(None)?;
-    /// # store.insert(b"key", b"value", None)?;
+    /// # store.insert(b"key", b"value")?;
     /// let value = store.get(b"key")?;
     /// assert_eq!(value, b"value");
     /// # Ok(())
@@ -494,8 +517,8 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// # let store = FeoxStore::new(None)?;
-    /// # store.insert(b"temp", b"data", None)?;
-    /// store.delete(b"temp", None)?;
+    /// # store.insert(b"temp", b"data")?;
+    /// store.delete(b"temp")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -504,7 +527,24 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~300ns
     /// * Persistent mode: ~400ns
-    pub fn delete(&self, key: &[u8], timestamp: Option<u64>) -> Result<()> {
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.delete_with_timestamp(key, None)
+    }
+
+    /// Delete a key-value pair with explicit timestamp.
+    ///
+    /// This is the advanced version that allows manual timestamp control.
+    /// Most users should use `delete()` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to delete
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn delete_with_timestamp(&self, key: &[u8], timestamp: Option<u64>) -> Result<()> {
         let start = std::time::Instant::now();
         let timestamp = match timestamp {
             Some(0) | None => self.get_timestamp(),
@@ -585,11 +625,11 @@ impl FeoxStore {
     /// # let store = FeoxStore::new(None)?;
     /// // Insert initial JSON value
     /// let initial = br#"{"name":"Alice","age":30}"#;
-    /// store.insert(b"user:1", initial, None)?;
+    /// store.insert(b"user:1", initial)?;
     ///
     /// // Apply JSON patch to update age
     /// let patch = br#"[{"op":"replace","path":"/age","value":31}]"#;
-    /// store.json_patch(b"user:1", patch, None)?;
+    /// store.json_patch(b"user:1", patch)?;
     ///
     /// // Value now has age updated to 31
     /// let updated = store.get(b"user:1")?;
@@ -597,7 +637,30 @@ impl FeoxStore {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn json_patch(&self, key: &[u8], patch: &[u8], timestamp: Option<u64>) -> Result<()> {
+    pub fn json_patch(&self, key: &[u8], patch: &[u8]) -> Result<()> {
+        self.json_patch_with_timestamp(key, patch, None)
+    }
+
+    /// Apply JSON patch with explicit timestamp.
+    ///
+    /// This is the advanced version that allows manual timestamp control.
+    /// Most users should use `json_patch()` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key whose value to patch
+    /// * `patch` - JSON Patch array (RFC 6902)
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn json_patch_with_timestamp(
+        &self,
+        key: &[u8],
+        patch: &[u8],
+        timestamp: Option<u64>,
+    ) -> Result<()> {
         let timestamp = match timestamp {
             Some(0) | None => self.get_timestamp(),
             Some(ts) => ts,
@@ -622,7 +685,7 @@ impl FeoxStore {
         let new_value = crate::utils::json_patch::apply_json_patch(&current_value, patch)?;
 
         // Now update without holding any references
-        self.insert(key, &new_value, Some(timestamp))
+        self.insert_with_timestamp(key, &new_value, Some(timestamp))
     }
 
     fn update_record(&self, old_record: &Record, value: &[u8], timestamp: u64) -> Result<()> {
@@ -739,10 +802,10 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// # let store = FeoxStore::new(None)?;
-    /// store.insert(b"user:001", b"Alice", None)?;
-    /// store.insert(b"user:002", b"Bob", None)?;
-    /// store.insert(b"user:003", b"Charlie", None)?;
-    /// store.insert(b"user:004", b"David", None)?;
+    /// store.insert(b"user:001", b"Alice")?;
+    /// store.insert(b"user:002", b"Bob")?;
+    /// store.insert(b"user:003", b"Charlie")?;
+    /// store.insert(b"user:004", b"David")?;
     ///
     /// // Get users 001 through 003 (inclusive)
     /// let results = store.range_query(b"user:001", b"user:003", 10)?;
@@ -792,7 +855,7 @@ impl FeoxStore {
     /// Use `i64::to_le_bytes()` to create the initial value:
     /// ```rust,ignore
     /// let zero: i64 = 0;
-    /// store.insert(b"counter", &zero.to_le_bytes(), None)?;
+    /// store.insert(b"counter", &zero.to_le_bytes())?;
     /// ```
     ///
     /// # Arguments
@@ -818,27 +881,50 @@ impl FeoxStore {
     /// # let store = FeoxStore::new(None)?;
     /// // Initialize counter with proper binary format
     /// let initial: i64 = 0;
-    /// store.insert(b"visits", &initial.to_le_bytes(), None)?;
+    /// store.insert(b"visits", &initial.to_le_bytes())?;
     ///
     /// // Increment atomically
-    /// let val = store.atomic_increment(b"visits", 1, None)?;
+    /// let val = store.atomic_increment(b"visits", 1)?;
     /// assert_eq!(val, 1);
     ///
     /// // Increment by 5
-    /// let val = store.atomic_increment(b"visits", 5, None)?;
+    /// let val = store.atomic_increment(b"visits", 5)?;
     /// assert_eq!(val, 6);
     ///
     /// // Decrement by 2
-    /// let val = store.atomic_increment(b"visits", -2, None)?;
+    /// let val = store.atomic_increment(b"visits", -2)?;
     /// assert_eq!(val, 4);
     ///
     /// // Or create new counter directly (starts at delta value)
-    /// let downloads = store.atomic_increment(b"downloads", 100, None)?;
+    /// let downloads = store.atomic_increment(b"downloads", 100)?;
     /// assert_eq!(downloads, 100);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn atomic_increment(&self, key: &[u8], delta: i64, timestamp: Option<u64>) -> Result<i64> {
+    pub fn atomic_increment(&self, key: &[u8], delta: i64) -> Result<i64> {
+        self.atomic_increment_with_timestamp(key, delta, None)
+    }
+
+    /// Atomically increment/decrement with explicit timestamp.
+    ///
+    /// This is the advanced version that allows manual timestamp control.
+    /// Most users should use `atomic_increment()` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to increment/decrement
+    /// * `delta` - Amount to add (negative to decrement)
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn atomic_increment_with_timestamp(
+        &self,
+        key: &[u8],
+        delta: i64,
+        timestamp: Option<u64>,
+    ) -> Result<i64> {
         self.validate_key(key)?;
 
         let key_vec = key.to_vec();
@@ -998,7 +1084,7 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// # let store = FeoxStore::new(None)?;
-    /// store.insert(b"large_file", &vec![0u8; 1_000_000], None)?;
+    /// store.insert(b"large_file", &vec![0u8; 1_000_000])?;
     ///
     /// // Check size before loading
     /// let size = store.get_size(b"large_file")?;
@@ -1025,7 +1111,7 @@ impl FeoxStore {
     /// # use feoxdb::FeoxStore;
     /// # fn main() -> feoxdb::Result<()> {
     /// let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
-    /// store.insert(b"important", b"data", None)?;
+    /// store.insert(b"important", b"data")?;
     /// store.flush_all();  // Ensure data is persisted
     /// # Ok(())
     /// # }

@@ -21,7 +21,7 @@ fn bench_insert(c: &mut Criterion) {
                 |(store, keys, values)| {
                     for (key, value) in keys.iter().zip(values.iter()) {
                         store
-                            .insert(black_box(key), black_box(value), None)
+                            .insert(black_box(key), black_box(value))
                             .unwrap();
                     }
                 },
@@ -45,7 +45,7 @@ fn bench_get(c: &mut Criterion) {
 
             // Pre-populate the store
             for key in &keys {
-                store.insert(key, b"value", None).unwrap();
+                store.insert(key, b"value").unwrap();
             }
 
             b.iter(|| {
@@ -69,7 +69,7 @@ fn bench_mixed(c: &mut Criterion) {
                 // Pre-populate without timestamps
                 for i in 0..1000 {
                     let key = format!("key_{:08}", i);
-                    store.insert(key.as_bytes(), b"value", None).unwrap();
+                    store.insert(key.as_bytes(), b"value").unwrap();
                 }
                 store
             },
@@ -85,7 +85,7 @@ fn bench_mixed(c: &mut Criterion) {
                         let _ = black_box(store.get(key.as_bytes()));
                     } else {
                         // 20% writes - let the store handle timestamps automatically
-                        let _ = store.insert(key.as_bytes(), b"new_value", None);
+                        let _ = store.insert(key.as_bytes(), b"new_value");
                     }
                 }
             },
