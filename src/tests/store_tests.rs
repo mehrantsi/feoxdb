@@ -290,11 +290,20 @@ fn test_json_patch_basic() {
 
     let updated = store.get(key).unwrap();
     let updated_str = String::from_utf8_lossy(&updated);
-    
+
     // Verify the specific changes were applied
-    assert!(updated_str.contains(r#""age":31"#), "Age should be updated to 31");
-    assert!(updated_str.contains(r#""name":"Alice""#), "Name should remain unchanged");
-    assert!(!updated_str.contains(r#""age":30"#), "Old age value should be gone");
+    assert!(
+        updated_str.contains(r#""age":31"#),
+        "Age should be updated to 31"
+    );
+    assert!(
+        updated_str.contains(r#""name":"Alice""#),
+        "Name should remain unchanged"
+    );
+    assert!(
+        !updated_str.contains(r#""age":30"#),
+        "Old age value should be gone"
+    );
 }
 
 #[test]
