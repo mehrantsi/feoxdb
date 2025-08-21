@@ -17,12 +17,12 @@ permissions:
 jobs:
   benchmark:
     name: Performance Benchmark
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # - name: Install Rust stable
+      #   uses: dtolnay/rust-toolchain@stable
       
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -38,7 +38,7 @@ jobs:
       
       - name: Run benchmarks
         run: |
-          cargo bench --bench throughput --bench latency
+          cargo bench --bench throughput
           echo "Benchmarks completed successfully"
         timeout-minutes: 15
       
@@ -47,57 +47,43 @@ jobs:
           mkdir -p benchmark-results
           cp -r target/criterion benchmark-results/
           
-          # Copy the index template if it exists
-          if [ -f docs/benchmark-template.html ]; then
-            cp docs/benchmark-template.html benchmark-results/index.html
-          else
-            # Generate a basic index if template doesn't exist
-            echo '<!DOCTYPE html><html><head><title>FeOxDB Benchmarks</title></head>' > benchmark-results/index.html
-            echo '<body><h1>FeOxDB Benchmarks</h1>' >> benchmark-results/index.html
-            echo '<p><a href="criterion/report/index.html">View Criterion Reports</a></p>' >> benchmark-results/index.html
-            echo '</body></html>' >> benchmark-results/index.html
-          fi
-          
-      - name: Generate benchmark summary
-        run: |
-          echo "# FeOxDB Benchmark Results" > benchmark-results/summary.md
-          echo "" >> benchmark-results/summary.md
-          echo "## Latest Performance Metrics" >> benchmark-results/summary.md
-          echo "" >> benchmark-results/summary.md
-          echo "### Throughput Benchmarks" >> benchmark-results/summary.md
-          find target/criterion -name "estimates.json" | while read f; do
-            name=$(echo $f | sed 's/.*criterion\/\(.*\)\/.*estimates.json/\1/' | sed 's/\//-/g')
-            mean=$(jq -r '.mean.point_estimate' $f 2>/dev/null || echo 'N/A')
-            if [ "$mean" != "N/A" ]; then
-              echo "- **$name**: $mean" >> benchmark-results/summary.md
-            fi
-          done
+          # Create an index.html for the benchmarks
+          cat > benchmark-results/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>FeOxDB Benchmarks</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; }
+                  h1 { color: #333; }
+                  ul { list-style-type: none; padding: 0; }
+                  li { margin: 10px 0; }
+                  a { color: #0066cc; text-decoration: none; padding: 5px; }
+                  a:hover { text-decoration: underline; }
+              </style>
+          </head>
+          <body>
+              <h1>FeOxDB Performance Benchmarks</h1>
+              <h2>Throughput Benchmarks</h2>
+              <ul>
+                  <li><a href="criterion/insert/report/index.html">Insert Operations</a></li>
+                  <li><a href="criterion/get/report/index.html">Get Operations</a></li>
+                  <li><a href="criterion/mixed_workload/report/index.html">Mixed Workload</a></li>
+              </ul>
+              <h2>Latency Benchmarks</h2>
+              <ul>
+                  <li><a href="criterion/get/report/index.html">Get Latency</a></li>
+                  <li><a href="criterion/insert/report/index.html">Insert Latency</a></li>
+                  <li><a href="criterion/mixed_operations/report/index.html">Mixed Operations</a></li>
+                  <li><a href="criterion/delete/report/index.html">Delete Operations</a></li>
+              </ul>
+          </body>
+          </html>
+          EOF
       
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./benchmark-results
-          destination_dir: benchmarks
-          keep_files: false
-      
-      - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: FeOxDB Benchmarks
-          tool: 'cargo'
-          output-file-path: target/criterion/**/*.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          comment-on-alert: true
-          alert-threshold: '150%'
-          comment-always: false
-          benchmark-data-dir-path: 'dev/bench'
-          gh-pages-branch: gh-pages
-      
-      - name: Upload benchmark artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: benchmark-results
+          name: benchmarks
           path: benchmark-results/
+      

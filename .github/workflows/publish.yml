@@ -1,6 +1,6 @@
-name: Publish to crates.io
+name: Publish
 
-# Manual trigger for publishing
+# Manual trigger for publishing to crates.io
 on:
   workflow_dispatch:
     inputs:
@@ -15,14 +15,14 @@ env:
 jobs:
   pre-publish-checks:
     name: Pre-publish Checks
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # - name: Install Rust stable
+      #   uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: rustfmt, clippy
       
       - name: Check version in Cargo.toml
         run: |
@@ -53,8 +53,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: pre-publish-checks
-    runs-on: ubuntu-latest
-    environment: crates-io
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       

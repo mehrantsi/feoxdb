@@ -1,0 +1,274 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      
+      # - name: Install Rust stable
+      #   uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build documentation
+        run: |
+          cargo doc --no-deps --all-features
+          echo '<meta http-equiv="refresh" content="0; url=feoxdb/index.html">' > target/doc/index.html
+      
+      - name: Setup benchmark baseline
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          echo "Setting up benchmark baseline for comparison..."
+          
+          # Download previous benchmark results to use as baseline
+          if curl -sfL https://mehrantsi.github.io/FeOxDB/benchmarks.tar.gz -o /tmp/benchmarks.tar.gz 2>/dev/null; then
+            echo "Found previous benchmark results"
+            mkdir -p target/criterion
+            tar -xzf /tmp/benchmarks.tar.gz -C target/criterion
+            
+            # Rename all "new" directories to "base" for comparison
+            find target/criterion -type d -name "new" | while read new_dir; do
+              base_dir="${new_dir%/new}/base"
+              echo "Moving $new_dir to $base_dir"
+              rm -rf "$base_dir" 2>/dev/null || true
+              mv "$new_dir" "$base_dir"
+            done
+            echo "Baseline setup complete"
+          else
+            echo "No previous benchmarks found (this is normal for first run)"
+          fi
+      
+      - name: Run benchmarks
+        run: |
+          # Run benchmarks normally to generate Criterion HTML reports
+          cargo bench --bench latency || true
+          cargo bench --bench throughput || true
+          
+          # Extract benchmark results for historical tracking
+          # Parse the Criterion output to create bencher format
+          echo "Extracting benchmark results..."
+          # Extract results from all criterion benchmarks that exist
+          if test -d "target/criterion"; then
+            find "target/criterion" -name "estimates.json" | while read f; do
+              name=$(echo "$f" | sed 's|.*/criterion/||' | sed 's|/estimates.json||' | tr '/' '_')
+              if test -f "$f"; then
+                mean=$(jq -r '.mean.point_estimate' "$f" 2>/dev/null || echo "")
+                if test -n "$mean"; then
+                  # Convert nanoseconds to appropriate unit and output in bencher format
+                  echo "test ${name} ... bench: ${mean} ns/iter (+/- 0)" >> benchmark-output.txt
+                fi
+              fi
+            done
+          fi
+          
+          # If no results were extracted, create a dummy file
+          if test ! -s benchmark-output.txt; then
+            echo "test dummy ... bench: 1 ns/iter (+/- 0)" > benchmark-output.txt
+          fi
+          
+          echo "=== Benchmark output ==="
+          cat benchmark-output.txt || echo "No benchmark output"
+        timeout-minutes: 15
+      
+      - name: Debug benchmark output
+        run: |
+          echo "=== Checking benchmark output ==="
+          ls -la target/ || echo "No target directory"
+          ls -la target/criterion/ || echo "No criterion directory"
+          find target/criterion -name "*.html" 2>/dev/null | head -20 || echo "No HTML files found"
+          
+      - name: Generate benchmark summary
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' 
+        run: |
+          echo "## Benchmark Results" > benchmark-summary.md
+          echo "" >> benchmark-summary.md
+          echo "### Latest Performance Metrics" >> benchmark-summary.md
+          echo "" >> benchmark-summary.md
+          
+          if test -s benchmark-output.txt; then
+            echo '```' >> benchmark-summary.md
+            cat benchmark-output.txt >> benchmark-summary.md
+            echo '```' >> benchmark-summary.md
+          else
+            echo "No benchmark results to display" >> benchmark-summary.md
+          fi
+          
+          echo "" >> benchmark-summary.md
+          echo "[View detailed reports](https://mehrantsi.github.io/FeOxDB/benchmarks.html)" >> benchmark-summary.md
+      
+      - name: Prepare GitHub Pages
+        run: |
+          mkdir -p public
+          
+          # Copy documentation
+          cp -r target/doc/* public/
+          
+          # Copy benchmark results if they exist
+          if [ -d "target/criterion" ]; then
+            mkdir -p public/benchmarks
+            cp -r target/criterion/* public/benchmarks/
+            
+            # Archive the entire criterion directory for next run
+            echo "Creating benchmark archive for future comparisons..."
+            tar -czf public/benchmarks.tar.gz -C target criterion
+            
+            # Create benchmarks index
+            cat > public/benchmarks.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>FeOxDB Benchmarks</title>
+              <style>
+                  body { 
+                      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+                      margin: 40px;
+                      line-height: 1.6;
+                  }
+                  h1 { color: #333; border-bottom: 2px solid #e1e4e8; padding-bottom: 10px; }
+                  h2 { color: #586069; margin-top: 30px; }
+                  ul { list-style-type: none; padding: 0; }
+                  li { 
+                      margin: 15px 0; 
+                      padding: 10px;
+                      background: #f6f8fa;
+                      border-radius: 6px;
+                  }
+                  a { 
+                      color: #0366d6; 
+                      text-decoration: none; 
+                      font-weight: 500;
+                  }
+                  a:hover { text-decoration: underline; }
+                  .nav { 
+                      background: #24292e; 
+                      color: white; 
+                      padding: 15px; 
+                      margin: -40px -40px 40px -40px;
+                  }
+                  .nav a { color: white; margin-right: 20px; }
+              </style>
+          </head>
+          <body>
+              <div class="nav">
+                  <a href="index.html">Documentation</a>
+                  <a href="benchmarks.html">Benchmarks</a>
+                  <a href="https://github.com/mehrantsi/feoxdb">GitHub</a>
+              </div>
+              
+              <h1>FeOxDB Performance Benchmarks</h1>
+              <p>Comprehensive performance metrics for FeOxDB operations.</p>
+              
+              <h2>Latency Benchmarks</h2>
+              <ul>
+                  <li><a href="benchmarks/get_latency/report/index.html">📊 Get Operations</a></li>
+                  <li><a href="benchmarks/insert_latency/report/index.html">📊 Insert Operations</a></li>
+                  <li><a href="benchmarks/delete_latency/report/index.html">📊 Delete Operations</a></li>
+                  <li><a href="benchmarks/mixed_latency/report/index.html">📊 Mixed Operations</a></li>
+              </ul>
+              
+              <h2>Throughput Benchmarks</h2>
+              <ul>
+                  <li><a href="benchmarks/insert/report/index.html">📊 Insert Operations</a></li>
+                  <li><a href="benchmarks/get/report/index.html">📊 Get Operations</a></li>
+                  <li><a href="benchmarks/mixed_operations/report/index.html">📊 Mixed Operations</a></li>
+              </ul>
+              
+              <h2>Individual Latency Reports</h2>
+              <ul>
+                  <li><a href="benchmarks/get_latency/sequential/report/index.html">Get - Sequential Access</a></li>
+                  <li><a href="benchmarks/get_latency/random/report/index.html">Get - Random Access</a></li>
+                  <li><a href="benchmarks/get_latency/hot_key/report/index.html">Get - Hot Key Access</a></li>
+                  <li><a href="benchmarks/insert_latency/size_64/report/index.html">Insert - 64 byte values</a></li>
+                  <li><a href="benchmarks/insert_latency/size_1024/report/index.html">Insert - 1KB values</a></li>
+                  <li><a href="benchmarks/insert_latency/size_4096/report/index.html">Insert - 4KB values</a></li>
+                  <li><a href="benchmarks/delete_latency/memory/report/index.html">Delete - Memory Mode</a></li>
+                  <li><a href="benchmarks/mixed_latency/80_read_15_write_5_delete/report/index.html">Mixed - 80/15/5 Read/Write/Delete</a></li>
+              </ul>
+              
+              <h2>Individual Throughput Reports</h2>
+              <ul>
+                  <li><a href="benchmarks/insert/1000/report/index.html">Insert - 1,000 ops</a></li>
+                  <li><a href="benchmarks/insert/10000/report/index.html">Insert - 10,000 ops</a></li>
+                  <li><a href="benchmarks/insert/100000/report/index.html">Insert - 100,000 ops</a></li>
+                  <li><a href="benchmarks/insert/1000000/report/index.html">Insert - 1,000,000 ops</a></li>
+                  <li><a href="benchmarks/get/1000/report/index.html">Get - 1,000 ops</a></li>
+                  <li><a href="benchmarks/get/10000/report/index.html">Get - 10,000 ops</a></li>
+                  <li><a href="benchmarks/get/100000/report/index.html">Get - 100,000 ops</a></li>
+                  <li><a href="benchmarks/get/1000000/report/index.html">Get - 1,000,000 ops</a></li>
+                  <li><a href="benchmarks/mixed_operations/80_20_read_write/report/index.html">Mixed - 80/20 Read/Write</a></li>
+              </ul>
+              
+              <h2>About the Benchmarks</h2>
+              <p>These benchmarks are automatically generated using Criterion.rs and represent real-world performance characteristics of FeOxDB.</p>
+          </body>
+          </html>
+          EOF
+          fi
+          
+          # Create main index with navigation
+          cat > public/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>FeOxDB Documentation</title>
+              <meta http-equiv="refresh" content="0; url=feoxdb/index.html">
+              <style>
+                  body { font-family: sans-serif; padding: 40px; }
+                  a { color: #0366d6; }
+              </style>
+          </head>
+          <body>
+              <p>Redirecting to <a href="feoxdb/index.html">FeOxDB Documentation</a>...</p>
+              <p>Also available: <a href="benchmarks.html">Performance Benchmarks</a></p>
+          </body>
+          </html>
+          EOF
+      
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+  
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: self-hosted
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
