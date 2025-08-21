@@ -96,19 +96,23 @@ jobs:
       #     components: llvm-tools-preview
       
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-llvm-cov || true
       
       - name: Generate code coverage
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          # Generate both lcov and HTML reports
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --all-features --workspace --html
         timeout-minutes: 10
       
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: lcov.info
-          fail_ci_if_error: false
+          name: coverage-report
+          path: target/llvm-cov/html/
 
   security-audit:
     name: Security Audit

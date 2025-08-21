@@ -46,6 +46,18 @@ jobs:
           cargo doc --no-deps --all-features
           echo '<meta http-equiv="refresh" content="0; url=feoxdb/index.html">' > target/doc/index.html
       
+      - name: Install cargo-llvm-cov
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-llvm-cov || true
+      
+      - name: Generate code coverage
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo llvm-cov --all-features --workspace --html
+          echo "Coverage report generated"
+        timeout-minutes: 10
+      
       - name: Setup benchmark baseline
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
@@ -139,6 +151,13 @@ jobs:
           # Copy documentation
           cp -r target/doc/* public/
           
+          # Copy code coverage report
+          if [ -d "target/llvm-cov/html" ]; then
+            mkdir -p public/coverage
+            cp -r target/llvm-cov/html/* public/coverage/
+            echo "Code coverage report copied"
+          fi
+          
           # Copy benchmark results if they exist
           if [ -d "target/criterion" ]; then
             mkdir -p public/benchmarks
@@ -200,6 +219,7 @@ jobs:
                   <div class="nav-links">
                       <a href="index.html">Documentation</a>
                       <a href="benchmarks.html">Benchmarks</a>
+                      <a href="coverage/index.html">Coverage</a>
                       <a href="https://github.com/mehrantsi/feoxdb">GitHub</a>
                   </div>
               </div>
@@ -268,7 +288,11 @@ jobs:
           </head>
           <body>
               <p>Redirecting to <a href="feoxdb/index.html">FeOxDB Documentation</a>...</p>
-              <p>Also available: <a href="benchmarks.html">Performance Benchmarks</a></p>
+              <p>Also available:</p>
+              <ul>
+                  <li><a href="benchmarks.html">Performance Benchmarks</a></li>
+                  <li><a href="coverage/index.html">Code Coverage Report</a></li>
+              </ul>
           </body>
           </html>
           EOF
