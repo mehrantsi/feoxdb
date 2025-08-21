@@ -20,9 +20,7 @@ fn bench_insert(c: &mut Criterion) {
                 },
                 |(store, keys, values)| {
                     for (key, value) in keys.iter().zip(values.iter()) {
-                        store
-                            .insert(black_box(key), black_box(value))
-                            .unwrap();
+                        store.insert(black_box(key), black_box(value)).unwrap();
                     }
                 },
                 criterion::BatchSize::SmallInput,
