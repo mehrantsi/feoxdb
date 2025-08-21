@@ -140,8 +140,11 @@ jobs:
             mkdir -p public/benchmarks
             cp -r target/criterion/* public/benchmarks/
             
-            # Archive the entire criterion directory for next run
+            # Archive only the "new" results for next run's baseline
             echo "Creating benchmark archive for future comparisons..."
+            # First, remove all "base" directories to avoid accumulating old baselines
+            find target/criterion -type d -name "base" -exec rm -rf {} + 2>/dev/null || true
+            # Now archive the criterion directory (which only has "new" results)
             tar -czf public/benchmarks.tar.gz -C target criterion
             
             # Create benchmarks index
