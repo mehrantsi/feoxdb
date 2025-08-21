@@ -91,11 +91,3 @@ impl Metadata {
         }
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct RecordInfo {
-    pub key_len: u16,
-    pub value_len: usize,
-    pub timestamp: u64,
-    pub key: Vec<u8>,
-}

@@ -321,24 +321,6 @@ impl WriteBuffer {
             }
         })
     }
-
-    pub fn stats(&self) -> WriteBufferStats {
-        let mut total_entries = 0;
-        let mut total_size = 0;
-
-        for buffer in self.sharded_buffers.iter() {
-            total_entries += buffer.count.load(Ordering::Relaxed);
-            total_size += buffer.size.load(Ordering::Relaxed);
-        }
-
-        WriteBufferStats {
-            total_entries,
-            total_size,
-            total_writes: self.stats.writes_buffered.load(Ordering::Relaxed) as usize,
-            total_flushes: self.stats.flush_count.load(Ordering::Relaxed) as usize,
-            failed_writes: self.stats.write_failures.load(Ordering::Relaxed) as usize,
-        }
-    }
 }
 
 /// Background worker for processing write buffer flushes
@@ -533,15 +515,6 @@ fn prepare_record_data(record: &Record) -> Result<Vec<u8>> {
     data.resize(padded_size, 0);
 
     Ok(data)
-}
-
-#[derive(Debug, Clone)]
-pub struct WriteBufferStats {
-    pub total_entries: usize,
-    pub total_size: usize,
-    pub total_writes: usize,
-    pub total_flushes: usize,
-    pub failed_writes: usize,
 }
 
 impl Drop for WriteBuffer {

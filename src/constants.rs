@@ -66,16 +66,6 @@ pub const IOURING_QUEUE_SIZE: u32 = 256;
 pub const IOURING_MAX_BATCH: usize = 128; // Safely under queue size
 pub const IOURING_SQPOLL_IDLE_MS: u32 = 1000;
 
-// Log levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
-    Debug = 0,
-    Info = 1,
-    Warning = 2,
-    Error = 3,
-    Alert = 4,
-}
-
 // Operation types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {

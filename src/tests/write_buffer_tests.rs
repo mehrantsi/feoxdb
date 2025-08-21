@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::thread;
 
-fn create_test_write_buffer() -> WriteBuffer {
+fn create_test_write_buffer() -> (WriteBuffer, Arc<Statistics>) {
     // Create temporary file for testing
     let temp_file = tempfile::NamedTempFile::new().unwrap();
     let file = temp_file.reopen().unwrap();
@@ -26,34 +26,42 @@ fn create_test_write_buffer() -> WriteBuffer {
 
     let stats = Arc::new(Statistics::new());
 
-    WriteBuffer::new(Arc::new(RwLock::new(disk_io)), free_space, stats)
+    let wb = WriteBuffer::new(Arc::new(RwLock::new(disk_io)), free_space, stats.clone());
+    (wb, stats)
 }
 
 #[test]
 fn test_write_buffer_creation() {
-    let wb = create_test_write_buffer();
-    let stats = wb.stats();
-
-    assert_eq!(stats.total_entries, 0);
-    assert_eq!(stats.total_size, 0);
+    let (_wb, stats) = create_test_write_buffer();
+    // Initially no writes buffered
+    assert_eq!(
+        stats
+            .writes_buffered
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
 fn test_add_write_operation() {
-    let wb = create_test_write_buffer();
+    let (wb, stats) = create_test_write_buffer();
 
     let record = Arc::new(Record::new(b"key".to_vec(), b"value".to_vec(), 100));
 
-    wb.add_write(crate::core::store::Operation::Insert, record, 0)
+    wb.add_write(crate::constants::Operation::Insert, record, 0)
         .unwrap();
 
-    let stats = wb.stats();
-    assert_eq!(stats.total_writes, 1);
+    assert_eq!(
+        stats
+            .writes_buffered
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]
 fn test_write_buffer_shutdown() {
-    let mut wb = create_test_write_buffer();
+    let (mut wb, _stats) = create_test_write_buffer();
     let num_shards = (num_cpus::get() / 2).max(1);
     wb.start_workers(num_shards);
 
@@ -64,7 +72,7 @@ fn test_write_buffer_shutdown() {
             format!("value_{}", i).into_bytes(),
             100 + i as u64,
         ));
-        wb.add_write(crate::core::store::Operation::Insert, record, 0)
+        wb.add_write(crate::constants::Operation::Insert, record, 0)
             .unwrap();
     }
 
@@ -74,14 +82,14 @@ fn test_write_buffer_shutdown() {
 
     // Should not accept new writes after shutdown
     let record = Arc::new(Record::new(b"after".to_vec(), b"shutdown".to_vec(), 200));
-    let result = wb.add_write(crate::core::store::Operation::Insert, record, 0);
+    let result = wb.add_write(crate::constants::Operation::Insert, record, 0);
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), FeoxError::ShuttingDown));
 }
 
 #[test]
 fn test_force_flush() {
-    let mut wb = create_test_write_buffer();
+    let (mut wb, stats) = create_test_write_buffer();
     let num_shards = (num_cpus::get() / 2).max(1);
     wb.start_workers(num_shards);
 
@@ -92,7 +100,7 @@ fn test_force_flush() {
             format!("value_{}", i).into_bytes(),
             100 + i as u64,
         ));
-        wb.add_write(crate::core::store::Operation::Insert, record, 0)
+        wb.add_write(crate::constants::Operation::Insert, record, 0)
             .unwrap();
     }
 
@@ -100,15 +108,14 @@ fn test_force_flush() {
     wb.force_flush().unwrap();
 
     // Stats should show flush
-    let stats = wb.stats();
-    assert!(stats.total_flushes > 0);
+    assert!(stats.flush_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
 
     wb.complete_shutdown();
 }
 
 #[test]
 fn test_concurrent_writes() {
-    let mut wb_mut = create_test_write_buffer();
+    let (mut wb_mut, stats) = create_test_write_buffer();
     wb_mut.start_workers(4);
     let wb = Arc::new(wb_mut);
 
@@ -124,7 +131,7 @@ fn test_concurrent_writes() {
                     1000 + (t * 100 + i) as u64,
                 ));
                 wb_clone
-                    .add_write(crate::core::store::Operation::Insert, record, 0)
+                    .add_write(crate::constants::Operation::Insert, record, 0)
                     .unwrap();
             }
         }));
@@ -134,13 +141,17 @@ fn test_concurrent_writes() {
         handle.join().unwrap();
     }
 
-    let stats = wb.stats();
-    assert_eq!(stats.total_writes, 1000);
+    assert_eq!(
+        stats
+            .writes_buffered
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1000
+    );
 }
 
 #[test]
 fn test_delete_operation() {
-    let wb = create_test_write_buffer();
+    let (wb, stats) = create_test_write_buffer();
 
     let record = Record::new(b"delete_key".to_vec(), b"value".to_vec(), 100);
     record
@@ -148,19 +159,23 @@ fn test_delete_operation() {
         .store(12345, std::sync::atomic::Ordering::Release);
 
     wb.add_write(
-        crate::core::store::Operation::Delete,
+        crate::constants::Operation::Delete,
         Arc::new(record),
         5, // old value length
     )
     .unwrap();
 
-    let stats = wb.stats();
-    assert!(stats.total_writes > 0);
+    assert!(
+        stats
+            .writes_buffered
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
 }
 
 #[test]
 fn test_update_operation() {
-    let wb = create_test_write_buffer();
+    let (wb, stats) = create_test_write_buffer();
 
     let record = Arc::new(Record::new(
         b"update_key".to_vec(),
@@ -169,19 +184,23 @@ fn test_update_operation() {
     ));
 
     wb.add_write(
-        crate::core::store::Operation::Update,
+        crate::constants::Operation::Update,
         record,
         9, // old value length
     )
     .unwrap();
 
-    let stats = wb.stats();
-    assert!(stats.total_writes > 0);
+    assert!(
+        stats
+            .writes_buffered
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
 }
 
 #[test]
 fn test_write_buffer_full_trigger() {
-    let mut wb = create_test_write_buffer();
+    let (mut wb, stats) = create_test_write_buffer();
     // Use the actual number of shards created
     let num_shards = (num_cpus::get() / 2).max(1);
     wb.start_workers(num_shards);
@@ -194,15 +213,14 @@ fn test_write_buffer_full_trigger() {
             vec![0u8; 2048], // 2KB each to reach 16MB faster
             100 + i as u64,
         ));
-        wb.add_write(crate::core::store::Operation::Insert, record, 0)
+        wb.add_write(crate::constants::Operation::Insert, record, 0)
             .unwrap();
     }
 
     // Force flush to ensure it happens
     wb.force_flush().unwrap();
 
-    let stats = wb.stats();
-    assert!(stats.total_flushes > 0);
+    assert!(stats.flush_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
 
     wb.complete_shutdown();
 }
@@ -215,7 +233,7 @@ fn test_write_entry_fields() {
     let record = Arc::new(Record::new(b"key".to_vec(), b"value".to_vec(), 100));
 
     let entry = WriteEntry {
-        op: crate::core::store::Operation::Insert,
+        op: crate::constants::Operation::Insert,
         record: record.clone(),
         old_value_len: 0,
         work_status: std::sync::atomic::AtomicU32::new(0),
