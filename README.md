@@ -1,11 +1,14 @@
 # FeOxDB
 
-Ultra-fast embedded key-value database for Rust with sub-microsecond latency. Achieve <300ns GET operations through lock-free data structures and optimized storage.
+Ultra-fast embedded key-value database for Rust with sub-microsecond latency.
+
+[📚 Documentation](https://mehrantsi.github.io/FeOxDB/) | [📊 Benchmarks](https://mehrantsi.github.io/FeOxDB/benchmarks.html) | [💬 Issues](https://github.com/mehrantsi/FeOxDB/issues)
 
 ## Features
 
 - **Sub-Microsecond Latency**: <300ns GET, <600ns INSERT operations
 - **Lock-Free Concurrency**: Built on DashMap and Crossbeam SkipList
+- **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 - **Flexible Storage**: Memory-only or persistent modes with async I/O
 - **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
 - **Atomic Counters**: Thread-safe increment/decrement operations
@@ -14,6 +17,25 @@ Ultra-fast embedded key-value database for Rust with sub-microsecond latency. Ac
 - **Statistics**: Real-time performance monitoring
 - **Free Space Management**: Dual RB-tree structure for O(log n) allocation
 - **Zero Fragmentation**: Automatic coalescing prevents disk fragmentation
+
+## ACID Properties and Durability
+
+FeOxDB provides ACI properties with relaxed durability:
+
+- **Atomicity**: ✅ Individual operations are atomic via Arc-wrapped records
+- **Consistency**: ✅ Timestamp-based conflict resolution ensures consistency
+- **Isolation**: ✅ Lock-free reads and sharded writes provide operation isolation
+- **Durability**: ⚠️ Write-behind logging with bounded data loss window
+
+### Durability Trade-offs
+
+FeOxDB trades full durability for extreme performance:
+- **Write-behind buffering**: Flushes every 100ms or when buffers fill (1024 entries or 16MB per shard)
+- **Worst-case data loss**: `100ms + 16MB / 4KB_random_write_QD1_throughput`
+  - Example (50MB/s SATA SSD): 100ms + 16MB / 50MB/s = 420ms
+  - Example (200MB/s NVMe): 100ms + 16MB / 200MB/s = 180ms
+- **Memory-only mode**: No durability, maximum performance
+- **Explicit flush**: Call `store.flush()` to synchronously write all buffered data (blocks until fsync completes)
 
 ## Quick Start
 
@@ -329,21 +351,6 @@ Writes are decoupled from disk I/O for maximum throughput:
 - Automatic value offloading when memory pressure increases
 - Configurable memory limits with graceful degradation
 - Reference counting for safe concurrent access
-
-## Use Cases
-
-### ✅ Perfect for:
-- **High-frequency trading**: Ultra-low latency market data
-- **Gaming**: Leaderboards, session storage, player state
-- **Web applications**: Session cache, rate limiting, feature flags
-- **IoT/Edge**: Time-series data, metrics collection
-- **ML/AI**: Feature stores, embedding cache
-
-### ❌ Not suitable for:
-- Complex SQL-like queries
-- Distributed multi-node setups
-- Large blob storage (>100MB values)
-- Strong consistency requirements across nodes
 
 ## API Documentation
 
