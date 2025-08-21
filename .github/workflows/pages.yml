@@ -191,7 +191,7 @@ jobs:
                       justify-content: space-between;
                   }
                   .nav-links a { color: white; margin-right: 20px; }
-                  .logo { height: 30px; }
+                  .logo { height: 50px; }
               </style>
           </head>
           <body>
