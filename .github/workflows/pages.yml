@@ -211,15 +211,15 @@ jobs:
               <ul>
                   <li><a href="benchmarks/get_latency/report/index.html">📊 Get Operations</a></li>
                   <li><a href="benchmarks/insert_latency/report/index.html">📊 Insert Operations</a></li>
-                  <li><a href="benchmarks/delete_latency/report/index.html">📊 Delete Operations</a></li>
-                  <li><a href="benchmarks/mixed_latency/report/index.html">📊 Mixed Operations</a></li>
+                  <li><a href="benchmarks/delete_latency/memory/report/index.html">📊 Delete Operations</a></li>
+                  <li><a href="benchmarks/mixed_latency/80_read_15_write_5_delete/report/index.html">📊 Mixed Operations</a></li>
               </ul>
               
               <h2>Throughput Benchmarks</h2>
               <ul>
                   <li><a href="benchmarks/insert/report/index.html">📊 Insert Operations</a></li>
                   <li><a href="benchmarks/get/report/index.html">📊 Get Operations</a></li>
-                  <li><a href="benchmarks/mixed_operations/report/index.html">📊 Mixed Operations</a></li>
+                  <li><a href="benchmarks/mixed_operations/80_20_read_write/report/index.html">📊 Mixed Operations</a></li>
               </ul>
               
               <h2>Individual Latency Reports</h2>
