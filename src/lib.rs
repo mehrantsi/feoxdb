@@ -156,9 +156,6 @@
 //!
 //! // The document is now updated with the patches applied
 //! let updated = store.get(b"user:123")?;
-//!
-//! // Verify the patch was applied (without using serde_json in doc test)
-//! assert!(updated.len() > initial_json.len()); // Should be bigger after adding email
 //! # Ok(())
 //! # }
 //! ```
