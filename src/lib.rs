@@ -47,7 +47,7 @@
 //! - **Write-behind buffering**: Flushes every 100ms or when buffers fill (1024 entries or 16MB per shard)
 //! - **Worst-case data loss**:
 //!   - **Time window**: `100ms + 16MB / 4KB_random_write_QD1_throughput`
-//!   - **Data at risk**: `16MB × num_shards` (e.g., 64MB for 4 shards, 128MB for 8 shards)
+//!   - **Data at risk**: `16MB × num_shards (num_shards = num_cpus / 2)` (e.g., 64MB for 4 shards, 128MB for 8 shards)
 //!   - Workers write in parallel, so time doesn't multiply with shards
 //!   - Example (50MB/s 4KB random QD1): 420ms window, up to 64MB at risk (4 shards)
 //!   - Example (200MB/s 4KB random QD1): 180ms window, up to 64MB at risk (4 shards)
