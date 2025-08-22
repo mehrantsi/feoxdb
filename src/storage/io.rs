@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::constants::*;
 use crate::error::{FeoxError, Result};
+#[cfg(unix)]
 use crate::utils::allocator::AlignedBuffer;
 
 pub struct DiskIO {
