@@ -251,7 +251,22 @@ fn main() -> Result<()> {
 
     // Initialize store
     let device_path = if use_persistence {
-        Some("/tmp/feox_deterministic_test.dat".to_string())
+        #[cfg(unix)]
+        let path = "/tmp/feox_deterministic_test.dat".to_string();
+
+        #[cfg(windows)]
+        let path = {
+            let temp_dir = std::env::temp_dir();
+            temp_dir
+                .join("feox_deterministic_test.dat")
+                .to_string_lossy()
+                .to_string()
+        };
+
+        #[cfg(not(any(unix, windows)))]
+        let path = "feox_deterministic_test.dat".to_string();
+
+        Some(path)
     } else {
         None
     };

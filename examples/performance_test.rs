@@ -218,8 +218,21 @@ fn main() -> Result<()> {
     // Create store based on mode
     let device_path = match persistence_mode {
         "persist" | "disk" => {
-            let path = std::env::var("FEOX_DEVICE_PATH")
-                .unwrap_or_else(|_| "/tmp/feox_test.dat".to_string());
+            let path = std::env::var("FEOX_DEVICE_PATH").unwrap_or_else(|_| {
+                #[cfg(unix)]
+                let default_path = "/tmp/feox_test.dat".to_string();
+
+                #[cfg(windows)]
+                let default_path = {
+                    let temp_dir = std::env::temp_dir();
+                    temp_dir.join("feox_test.dat").to_string_lossy().to_string()
+                };
+
+                #[cfg(not(any(unix, windows)))]
+                let default_path = "feox_test.dat".to_string();
+
+                default_path
+            });
             println!(
                 "{}Using persistent storage:{} {}",
                 ANSI_YELLOW, ANSI_RESET, path

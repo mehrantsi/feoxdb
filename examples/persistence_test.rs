@@ -8,13 +8,26 @@ fn main() -> Result<()> {
     println!("FeOxDB Persistence Test");
     println!("{}", "═".repeat(72));
 
-    let db_path = "/tmp/feox_persistence_test.db";
+    #[cfg(unix)]
+    let db_path = "/tmp/feox_persistence_test.db".to_string();
+
+    #[cfg(windows)]
+    let db_path = {
+        let temp_dir = std::env::temp_dir();
+        temp_dir
+            .join("feox_persistence_test.db")
+            .to_string_lossy()
+            .to_string()
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let db_path = "feox_persistence_test.db".to_string();
 
     // Clean up any existing test file
-    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(&db_path);
 
     println!("\n>>> Phase 1: Writing test data");
-    println!("Database path: {}", db_path);
+    println!("Database path: {}", &db_path);
 
     // Create test data with various sizes
     let test_data = vec![
@@ -34,7 +47,7 @@ fn main() -> Result<()> {
 
     // Phase 1: Write data
     {
-        let store = FeoxStore::new(Some(db_path.to_string()))?;
+        let store = FeoxStore::new(Some(db_path.clone()))?;
 
         for (key, value) in &test_data {
             let key_bytes = format!("test:{}", key).into_bytes();
@@ -91,7 +104,7 @@ fn main() -> Result<()> {
     // Phase 2: Reload, verify phase 1 data, and add new data
     {
         println!("\n>>> Opening existing database...");
-        let store = FeoxStore::new(Some(db_path.to_string()))?;
+        let store = FeoxStore::new(Some(db_path.clone()))?;
 
         // Give it time to load from disk
         thread::sleep(Duration::from_secs(1));
@@ -199,7 +212,7 @@ fn main() -> Result<()> {
     // Phase 3: Final reload to verify ALL data from both phases persisted
     {
         println!("\n>>> Opening database for final verification...");
-        let store = FeoxStore::new(Some(db_path.to_string()))?;
+        let store = FeoxStore::new(Some(db_path.clone()))?;
 
         // Give it time to load and rebuild indexes
         thread::sleep(Duration::from_secs(1));
