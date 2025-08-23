@@ -98,7 +98,6 @@ impl DiskIO {
 
                 if read < 0 {
                     let err = io::Error::last_os_error();
-                    eprintln!("pread failed at offset {}: {}", offset, err);
                     return Err(FeoxError::IoError(err));
                 }
 
@@ -126,7 +125,6 @@ impl DiskIO {
 
                 if read < 0 {
                     let err = io::Error::last_os_error();
-                    eprintln!("pread failed at offset {}: {}", offset, err);
                     return Err(FeoxError::IoError(err));
                 }
 
