@@ -42,6 +42,26 @@ FeOxDB trades full durability for extreme performance:
 - **Memory-only mode**: No durability, maximum performance
 - **Explicit flush**: Call `store.flush()` to synchronously write all buffered data (blocks until fsync completes)
 
+### FAQ:
+
+Q: Would the durability tradeoff for extreme performance worth it?
+  - For KV stores, there are more use cases that can accept this _slightly_ relaxed durability model than not. of course this isn't the case for a main DB, but KV stores often handle derived data, caches, or state that can be rebuilt.
+    That said, for cases needing stronger durability, you can call flush_all() after critical operations - gives you fsync-level guarantees.
+    The philosophy is: make the fast path really fast for those who need it, but provide escape hatches for stronger guarantees when needed.
+
+Q: What kind of applications would nned this kind of performance? Why these latency numbers matter?
+  - The real value isn't just raw speed - it's efficiency.
+    When operations complete in 200ns instead of blocking for microseconds/milliseconds on fsync, you avoid thread pool exhaustion and connection queueing. Each sync operation blocks that thread until disk confirms - tying up memory, connection slots, and causing tail latency spikes.
+
+    With FeOxDB's write-behind approach:
+      - Operations return immediately, threads stay available
+      - Background workers batch writes, amortizing sync costs across many operations
+      - Same hardware can handle 100x more concurrent requests
+      - Lower cloud bills from needing fewer instances
+
+     For desktop apps, this means your KV store doesn't tie up threads that the UI needs. For servers, it means handling more users without scaling up.
+     The durability tradeoff makes sense when you realize most KV workloads are derived data that can be rebuilt. Why block threads and exhaust IOPS for fsync-level durability on data that doesn't need it?
+   
 ## Quick Start
 
 ### Installation
