@@ -165,7 +165,6 @@ impl ClockCache {
             return;
         }
 
-        let mut evicted_bytes = 0;
         let mut scans = 0;
         const MAX_SCANS: usize = 3; // Maximum passes through cache
 
@@ -196,7 +195,6 @@ impl ClockCache {
                     } else {
                         // No reference bit - evict this entry
                         let removed = bucket.remove(i);
-                        evicted_bytes += removed.size;
                         self.stats
                             .cache_memory
                             .fetch_sub(removed.size, Ordering::AcqRel);
@@ -214,15 +212,6 @@ impl ClockCache {
             }
 
             scans += 1;
-        }
-
-        if evicted_bytes > 0 {
-            // Log eviction statistics
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "Cache eviction: freed {} bytes in {} scans, usage now: {} bytes",
-                evicted_bytes, scans, current_usage
-            );
         }
     }
 
