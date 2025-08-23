@@ -46,7 +46,7 @@ FeOxDB trades full durability for extreme performance:
 
 Q: Would the durability tradeoff for extreme performance worth it?
   - For KV stores, there are more use cases that can accept this _slightly_ relaxed durability model than not. of course this isn't the case for a main DB, but KV stores often handle derived data, caches, or state that can be rebuilt.
-    That said, for cases needing stronger durability, you can call flush_all() after critical operations - gives you fsync-level guarantees.
+    That said, for cases needing stronger durability, you can call `store.flush()` after critical operations - gives you fsync-level guarantees.
     The philosophy is: make the fast path really fast for those who need it, but provide escape hatches for stronger guarantees when needed.
 
 Q: What kind of applications would nned this kind of performance? Why these latency numbers matter?
