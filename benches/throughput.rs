@@ -48,7 +48,7 @@ fn bench_get(c: &mut Criterion) {
 
             b.iter(|| {
                 for key in &keys {
-                    black_box(store.get(black_box(key)).unwrap());
+                    black_box(store.get_bytes(black_box(key)).unwrap());
                 }
             });
         });
@@ -80,7 +80,7 @@ fn bench_mixed(c: &mut Criterion) {
 
                     if rng.random_range(0..100) < 80 {
                         // 80% reads
-                        let _ = black_box(store.get(key.as_bytes()));
+                        let _ = black_box(store.get_bytes(key.as_bytes()));
                     } else {
                         // 20% writes - let the store handle timestamps automatically
                         let _ = store.insert(key.as_bytes(), b"new_value");

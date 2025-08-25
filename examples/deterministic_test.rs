@@ -309,12 +309,13 @@ fn main() -> Result<()> {
 
     // Phase 2: GET all keys
     println!("\n{}Phase 2: GET{}", ANSI_BLUE, ANSI_RESET);
+
     let phase_start = Instant::now();
     for i in 0..num_keys {
         let key = generate_key(i);
 
         let op_start = Instant::now();
-        let success = store.get(&key).is_ok();
+        let success = store.get_bytes(&key).is_ok();
         let latency_ns = op_start.elapsed().as_nanos() as u64;
 
         get_stats.record(latency_ns, success);

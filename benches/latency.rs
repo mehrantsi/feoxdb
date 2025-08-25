@@ -18,10 +18,10 @@ fn benchmark_get_latency(c: &mut Criterion) {
         store.insert(key.as_bytes(), &value).unwrap();
     }
 
-    // Test different key patterns
+    // Test different key patterns with get()
     for pattern in ["sequential", "random", "hot_key"].iter() {
         group.bench_with_input(
-            BenchmarkId::from_parameter(pattern),
+            BenchmarkId::from_parameter(format!("get_{}", pattern)),
             pattern,
             |b, &pattern| {
                 let store = store.clone();
@@ -55,6 +55,51 @@ fn benchmark_get_latency(c: &mut Criterion) {
                             };
                             let key = format!("key_{:06}", idx);
                             black_box(store.get(key.as_bytes()).ok());
+                        });
+                    }
+                    _ => {}
+                }
+            },
+        );
+    }
+
+    // Test different key patterns with get_bytes()
+    for pattern in ["sequential", "random", "hot_key"].iter() {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("get_bytes_{}", pattern)),
+            pattern,
+            |b, &pattern| {
+                let store = store.clone();
+                match pattern {
+                    "sequential" => {
+                        let mut i = 0;
+                        b.iter(|| {
+                            let key = format!("key_{:06}", i % 10000);
+                            black_box(store.get_bytes(key.as_bytes()).ok());
+                            i += 1;
+                        });
+                    }
+                    "random" => {
+                        use rand::Rng;
+                        let mut rng = rand::rng();
+                        b.iter(|| {
+                            let idx = rng.random_range(0..10000);
+                            let key = format!("key_{:06}", idx);
+                            black_box(store.get_bytes(key.as_bytes()).ok());
+                        });
+                    }
+                    "hot_key" => {
+                        // 90% of requests go to 10% of keys
+                        use rand::Rng;
+                        let mut rng = rand::rng();
+                        b.iter(|| {
+                            let idx = if rng.random_bool(0.9) {
+                                rng.random_range(0..1000)
+                            } else {
+                                rng.random_range(1000..10000)
+                            };
+                            let key = format!("key_{:06}", idx);
+                            black_box(store.get_bytes(key.as_bytes()).ok());
                         });
                     }
                     _ => {}
@@ -120,7 +165,7 @@ fn benchmark_mixed_workload(c: &mut Criterion) {
                 // Read
                 let idx = rng.random_range(0..10000);
                 let key = format!("key_{:06}", idx);
-                black_box(store.get(key.as_bytes()).ok());
+                black_box(store.get_bytes(key.as_bytes()).ok());
             } else if op < 95 {
                 // Write
                 let key = format!("key_{:06}", next_key);

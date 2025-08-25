@@ -298,6 +298,7 @@ pub mod stats;
 pub mod storage;
 pub mod utils;
 
+pub use bytes::Bytes;
 pub use core::store::{FeoxStore, StoreBuilder, StoreConfig};
 pub use error::{FeoxError, Result};
 pub use stats::Statistics;
