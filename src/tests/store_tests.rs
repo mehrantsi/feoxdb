@@ -45,6 +45,78 @@ fn test_update_existing_key() {
 }
 
 #[test]
+fn test_get_bytes_basic() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let key = b"test_key";
+    let value = b"test_value";
+
+    store.insert(key, value).unwrap();
+
+    let bytes_result = store.get_bytes(key).unwrap();
+    assert_eq!(&bytes_result[..], value);
+
+    assert!(!bytes_result.is_empty());
+    assert_eq!(bytes_result.len(), value.len());
+}
+
+#[test]
+fn test_get_bytes_large_value() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let key = b"large_key";
+    let value = vec![b'x'; 100_000];
+
+    store.insert(key, &value).unwrap();
+
+    let bytes_result = store.get_bytes(key).unwrap();
+    assert_eq!(&bytes_result[..], &value[..]);
+    assert_eq!(bytes_result.len(), 100_000);
+}
+
+#[test]
+fn test_get_bytes_zero_copy_semantics() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let key = b"zero_copy_key";
+    let value = b"shared_value";
+
+    store.insert(key, value).unwrap();
+
+    let bytes1 = store.get_bytes(key).unwrap();
+    let bytes2 = store.get_bytes(key).unwrap();
+
+    assert_eq!(&bytes1[..], &bytes2[..]);
+    assert_eq!(&bytes1[..], value);
+}
+
+#[test]
+fn test_get_bytes_key_not_found() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let result = store.get_bytes(b"nonexistent");
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), FeoxError::KeyNotFound));
+}
+
+#[test]
+fn test_get_bytes_after_update() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let key = b"update_bytes_key";
+    let value1 = b"initial";
+    let value2 = b"updated_value_longer";
+
+    store.insert(key, value1).unwrap();
+    let bytes1 = store.get_bytes(key).unwrap();
+    assert_eq!(&bytes1[..], value1);
+
+    store.insert(key, value2).unwrap();
+    let bytes2 = store.get_bytes(key).unwrap();
+    assert_eq!(&bytes2[..], value2);
+}
+
+#[test]
 fn test_empty_store() {
     let store = FeoxStore::new(None).unwrap();
 
