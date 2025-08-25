@@ -49,7 +49,7 @@ Q: Would the durability tradeoff for extreme performance worth it?
     That said, for cases needing stronger durability, you can call `store.flush()` after critical operations - gives you fsync-level guarantees.
     The philosophy is: make the fast path really fast for those who need it, but provide escape hatches for stronger guarantees when needed.
 
-Q: What kind of applications would nned this kind of performance? Why these latency numbers matter?
+Q: What kind of applications would need this performance? Why these latency numbers matter?
   - The real value isn't just raw speed - it's efficiency.
     When operations complete in 200ns instead of blocking for microseconds/milliseconds on fsync, you avoid thread pool exhaustion and connection queueing. Each sync operation blocks that thread until disk confirms - tying up memory, connection slots, and causing tail latency spikes.
 
