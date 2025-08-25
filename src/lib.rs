@@ -22,7 +22,7 @@
 //!
 //! ## Features
 //!
-//! - **Ultra-Low Latency**: <300ns GET operations, <600ns INSERT operations
+//! - **Ultra-Low Latency**: <200ns GET operations, <600ns INSERT operations
 //! - **Lock-Free Operations**: Uses DashMap and SkipList for concurrent access
 //! - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 //! - **Flexible Storage**: Memory-only or persistent modes with async I/O
