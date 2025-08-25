@@ -8,7 +8,7 @@
 
 ## Features
 
-- **Sub-Microsecond Latency**: <300ns GET, <600ns INSERT operations
+- **Sub-Microsecond Latency**: <200ns GET, <600ns INSERT operations
 - **Lock-Free Concurrency**: Built on DashMap and Crossbeam SkipList
 - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 - **Flexible Storage**: Memory-only or persistent modes with async I/O
