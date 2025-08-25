@@ -5,7 +5,7 @@ use crate::storage::metadata::Metadata;
 fn test_metadata_creation() {
     let metadata = Metadata::new();
 
-    assert_eq!(metadata.version, 1);
+    assert_eq!(metadata.version, 2);
     assert_eq!(metadata.total_records, 0);
     assert_eq!(metadata.total_size, 0);
     assert!(metadata.creation_time > 0);

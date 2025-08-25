@@ -5,13 +5,15 @@ use parking_lot::RwLock;
 use std::io;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::constants::Operation;
 use crate::constants::*;
 use crate::core::record::Record;
+use crate::core::ttl_sweep::{TtlConfig, TtlSweeper};
 use crate::error::{FeoxError, Result};
 use crate::stats::Statistics;
+use crate::storage::format::get_format;
 use crate::storage::free_space::FreeSpaceManager;
 use crate::storage::metadata::Metadata;
 use crate::storage::write_buffer::WriteBuffer;
@@ -58,6 +60,12 @@ pub struct FeoxStore {
 
     // Disk I/O
     disk_io: Option<Arc<RwLock<crate::storage::io::DiskIO>>>,
+
+    // TTL sweeper (if enabled)
+    ttl_sweeper: Arc<RwLock<Option<TtlSweeper>>>,
+
+    // TTL feature flag
+    enable_ttl: bool,
 }
 
 /// Configuration options for FeoxStore.
@@ -69,6 +77,8 @@ pub struct StoreConfig {
     pub enable_caching: bool,
     pub device_path: Option<String>,
     pub max_memory: Option<usize>,
+    pub enable_ttl: bool,
+    pub ttl_config: Option<TtlConfig>,
 }
 
 /// Builder for creating FeoxStore with custom configuration.
@@ -84,6 +94,7 @@ pub struct StoreConfig {
 /// let store = FeoxStore::builder()
 ///     .max_memory(1_000_000_000)
 ///     .hash_bits(20)
+///     .enable_ttl(true)
 ///     .build()?;
 /// # Ok(())
 /// # }
@@ -93,6 +104,8 @@ pub struct StoreBuilder {
     device_path: Option<String>,
     max_memory: Option<usize>,
     enable_caching: Option<bool>,
+    enable_ttl: bool,
+    ttl_config: Option<TtlConfig>,
 }
 
 impl StoreBuilder {
@@ -101,7 +114,9 @@ impl StoreBuilder {
             hash_bits: DEFAULT_HASH_BITS,
             device_path: None,
             max_memory: Some(DEFAULT_MAX_MEMORY),
-            enable_caching: None, // Auto-detect based on storage mode
+            enable_caching: None, // Disable caching for memory-only mode
+            enable_ttl: false,
+            ttl_config: None,
         }
     }
 
@@ -149,6 +164,59 @@ impl StoreBuilder {
         self
     }
 
+    /// Enable or disable TTL (Time-To-Live) functionality.
+    ///
+    /// When disabled (default), TTL operations will return errors and no background cleaner runs.
+    /// When enabled, keys can have expiry times and a background cleaner removes expired keys.
+    /// Default: false (disabled for optimal performance)
+    pub fn enable_ttl(mut self, enable: bool) -> Self {
+        self.enable_ttl = enable;
+        if enable {
+            let mut config = self.ttl_config.unwrap_or_default();
+            config.enabled = true;
+            self.ttl_config = Some(config);
+        }
+        self
+    }
+
+    /// Enable or disable TTL sweeper.
+    ///
+    /// When enabled, a background thread periodically removes expired keys.
+    /// Note: This method is deprecated in favor of enable_ttl().
+    pub fn enable_ttl_cleaner(mut self, enable: bool) -> Self {
+        let mut config = self.ttl_config.unwrap_or_default();
+        config.enabled = enable;
+        self.ttl_config = Some(config);
+        self.enable_ttl = enable; // Also enable TTL when cleaner is enabled
+        self
+    }
+
+    /// Configure TTL sweeper with custom parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `sample_size` - Keys to check per batch
+    /// * `threshold` - Continue if >threshold expired (0.0-1.0)
+    /// * `max_time_ms` - Max milliseconds per cleaning run
+    /// * `interval_ms` - Sleep between runs
+    pub fn ttl_sweeper_config(
+        mut self,
+        sample_size: usize,
+        threshold: f32,
+        max_time_ms: u64,
+        interval_ms: u64,
+    ) -> Self {
+        self.ttl_config = Some(TtlConfig {
+            sample_size,
+            expiry_threshold: threshold,
+            max_iterations: 16,
+            max_time_per_run: Duration::from_millis(max_time_ms),
+            sleep_interval: Duration::from_millis(interval_ms),
+            enabled: true,
+        });
+        self
+    }
+
     /// Build the FeoxStore
     pub fn build(self) -> Result<FeoxStore> {
         let memory_only = self.device_path.is_none();
@@ -160,6 +228,8 @@ impl StoreBuilder {
             enable_caching,
             device_path: self.device_path,
             max_memory: self.max_memory,
+            enable_ttl: self.enable_ttl,
+            ttl_config: self.ttl_config,
         };
 
         FeoxStore::with_config(config)
@@ -182,6 +252,8 @@ impl FeoxStore {
             enable_caching: !memory_only, // Disable caching for memory-only mode
             device_path,
             max_memory: Some(DEFAULT_MAX_MEMORY),
+            enable_ttl: false,
+            ttl_config: None,
         };
         let hash_table = DashMap::with_capacity(1 << config.hash_bits);
 
@@ -211,6 +283,8 @@ impl FeoxStore {
             device_size: 0,
             device_file: None,
             disk_io: None,
+            ttl_sweeper: Arc::new(RwLock::new(None)),
+            enable_ttl: config.enable_ttl,
         };
 
         if !config.memory_only {
@@ -219,7 +293,9 @@ impl FeoxStore {
 
             // Initialize write buffer for persistent mode
             if let Some(ref disk_io) = store.disk_io {
-                let mut write_buffer = WriteBuffer::new(disk_io.clone(), free_space, stats.clone());
+                let metadata_version = store._metadata.read().version;
+                let mut write_buffer =
+                    WriteBuffer::new(disk_io.clone(), free_space, stats.clone(), metadata_version);
                 let num_workers = (num_cpus::get() / 2).max(1);
                 write_buffer.start_workers(num_workers);
                 store.write_buffer = Some(Arc::new(write_buffer));
@@ -260,6 +336,8 @@ impl FeoxStore {
             device_size: 0,
             device_file: None,
             disk_io: None,
+            ttl_sweeper: Arc::new(RwLock::new(None)),
+            enable_ttl: config.enable_ttl,
         };
 
         if !config.memory_only {
@@ -268,7 +346,9 @@ impl FeoxStore {
 
             // Initialize write buffer for persistent mode
             if let Some(ref disk_io) = store.disk_io {
-                let mut write_buffer = WriteBuffer::new(disk_io.clone(), free_space, stats.clone());
+                let metadata_version = store._metadata.read().version;
+                let mut write_buffer =
+                    WriteBuffer::new(disk_io.clone(), free_space, stats.clone(), metadata_version);
                 let num_workers = (num_cpus::get() / 2).max(1);
                 write_buffer.start_workers(num_workers);
                 store.write_buffer = Some(Arc::new(write_buffer));
@@ -297,6 +377,9 @@ impl FeoxStore {
     }
 
     /// Insert or update a key-value pair.
+    ///
+    /// If the key already exists with a TTL, the TTL is removed (key becomes permanent).
+    /// To preserve or set TTL, use `insert_with_ttl()` instead.
     ///
     /// # Arguments
     ///
@@ -328,10 +411,82 @@ impl FeoxStore {
     ///
     /// # Performance
     ///
-    /// * Memory mode: ~800ns
-    /// * Persistent mode: ~1µs (buffered write)
+    /// * Memory mode: ~600ns
+    /// * Persistent mode: ~800ns (buffered write)
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.insert_with_timestamp(key, value, None)
+    }
+
+    /// Insert or update a key-value pair with TTL (Time-To-Live).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert (max 65KB)
+    /// * `value` - The value to store (max 4GB)
+    /// * `ttl_seconds` - Time-to-live in seconds
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::builder().enable_ttl(true).build()?;
+    /// // Key expires after 60 seconds
+    /// store.insert_with_ttl(b"session:123", b"data", 60)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// * Memory mode: ~800ns
+    /// * Persistent mode: ~1µs (buffered write)
+    pub fn insert_with_ttl(&self, key: &[u8], value: &[u8], ttl_seconds: u64) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.insert_with_ttl_and_timestamp(key, value, ttl_seconds, None)
+    }
+
+    /// Insert or update a key-value pair with TTL and explicit timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert (max 65KB)
+    /// * `value` - The value to store (max 4GB)
+    /// * `ttl_seconds` - Time-to-live in seconds
+    /// * `timestamp` - Optional timestamp for conflict resolution. If `None`, uses current time.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    pub fn insert_with_ttl_and_timestamp(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+        timestamp: Option<u64>,
+    ) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        let timestamp = match timestamp {
+            Some(0) | None => self.get_timestamp(),
+            Some(ts) => ts,
+        };
+
+        // Calculate expiry timestamp
+        let ttl_expiry = if ttl_seconds > 0 {
+            timestamp + (ttl_seconds * 1_000_000_000) // Convert seconds to nanoseconds
+        } else {
+            0
+        };
+
+        self.insert_with_timestamp_and_ttl_internal(key, value, Some(timestamp), ttl_expiry)
     }
 
     /// Insert or update a key-value pair with explicit timestamp.
@@ -354,6 +509,16 @@ impl FeoxStore {
         value: &[u8],
         timestamp: Option<u64>,
     ) -> Result<()> {
+        self.insert_with_timestamp_and_ttl_internal(key, value, timestamp, 0)
+    }
+
+    fn insert_with_timestamp_and_ttl_internal(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        timestamp: Option<u64>,
+        ttl_expiry: u64,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
         let timestamp = match timestamp {
             Some(0) | None => self.get_timestamp(),
@@ -373,7 +538,7 @@ impl FeoxStore {
             }
 
             // Update existing record
-            return self.update_record(&existing_clone, value, timestamp);
+            return self.update_record_with_ttl(&existing_clone, value, timestamp, ttl_expiry);
         }
 
         let record_size = self.calculate_record_size(key.len(), value.len());
@@ -381,8 +546,18 @@ impl FeoxStore {
             return Err(FeoxError::OutOfMemory);
         }
 
-        // Create new record
-        let record = Arc::new(Record::new(key.to_vec(), value.to_vec(), timestamp));
+        // Create new record with TTL if specified and TTL is enabled
+        let record = if ttl_expiry > 0 && self.enable_ttl {
+            self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
+            Arc::new(Record::new_with_timestamp_ttl(
+                key.to_vec(),
+                value.to_vec(),
+                timestamp,
+                ttl_expiry,
+            ))
+        } else {
+            Arc::new(Record::new(key.to_vec(), value.to_vec(), timestamp))
+        };
 
         let key_vec = record.key.clone();
 
@@ -477,6 +652,21 @@ impl FeoxStore {
 
         let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
 
+        // Check TTL expiry if TTL is enabled
+        if self.enable_ttl {
+            let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
+            if ttl_expiry > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                if now > ttl_expiry {
+                    self.stats.ttl_expired_lazy.fetch_add(1, Ordering::Relaxed);
+                    return Err(FeoxError::KeyNotFound);
+                }
+            }
+        }
+
         let value = if let Some(val) = record.get_value() {
             val.to_vec()
         } else {
@@ -544,6 +734,21 @@ impl FeoxStore {
         }
 
         let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+
+        // Check TTL expiry if TTL is enabled
+        if self.enable_ttl {
+            let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
+            if ttl_expiry > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                if now > ttl_expiry {
+                    self.stats.ttl_expired_lazy.fetch_add(1, Ordering::Relaxed);
+                    return Err(FeoxError::KeyNotFound);
+                }
+            }
+        }
 
         let (value, cache_hit) = if let Some(val) = record.get_value() {
             (val, true)
@@ -755,12 +960,27 @@ impl FeoxStore {
         self.insert_with_timestamp(key, &new_value, Some(timestamp))
     }
 
-    fn update_record(&self, old_record: &Record, value: &[u8], timestamp: u64) -> Result<()> {
-        let new_record = Arc::new(Record::new(
-            old_record.key.clone(),
-            value.to_vec(),
-            timestamp,
-        ));
+    fn update_record_with_ttl(
+        &self,
+        old_record: &Record,
+        value: &[u8],
+        timestamp: u64,
+        ttl_expiry: u64,
+    ) -> Result<()> {
+        let new_record = if ttl_expiry > 0 && self.enable_ttl {
+            Arc::new(Record::new_with_timestamp_ttl(
+                old_record.key.clone(),
+                value.to_vec(),
+                timestamp,
+                ttl_expiry,
+            ))
+        } else {
+            Arc::new(Record::new(
+                old_record.key.clone(),
+                value.to_vec(),
+                timestamp,
+            ))
+        };
 
         let old_value_len = old_record.value_len;
         let old_size = old_record.calculate_size();
@@ -1129,6 +1349,131 @@ impl FeoxStore {
         result
     }
 
+    /// Get the remaining TTL (Time-To-Live) for a key in seconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(seconds)` if the key has TTL set, `None` if no TTL or key not found.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::builder().enable_ttl(true).build()?;
+    /// store.insert_with_ttl(b"session", b"data", 3600)?;
+    ///
+    /// // Check remaining TTL
+    /// if let Ok(Some(ttl)) = store.get_ttl(b"session") {
+    ///     println!("Session expires in {} seconds", ttl);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get_ttl(&self, key: &[u8]) -> Result<Option<u64>> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.validate_key(key)?;
+
+        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let ttl_expiry = record.ttl_expiry.load(Ordering::Acquire);
+
+        if ttl_expiry == 0 {
+            return Ok(None); // No TTL set
+        }
+
+        let now = self.get_timestamp();
+        if now >= ttl_expiry {
+            return Ok(Some(0)); // Already expired
+        }
+
+        // Return remaining seconds
+        Ok(Some((ttl_expiry - now) / 1_000_000_000))
+    }
+
+    /// Update the TTL for an existing key.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to update
+    /// * `ttl_seconds` - New TTL in seconds (0 to remove TTL)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    ///
+    /// # Errors
+    ///
+    /// * `KeyNotFound` - Key does not exist
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::builder().enable_ttl(true).build()?;
+    /// # store.insert(b"key", b"value")?;
+    /// // Extend TTL to 1 hour
+    /// store.update_ttl(b"key", 3600)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update_ttl(&self, key: &[u8], ttl_seconds: u64) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.validate_key(key)?;
+
+        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+
+        let new_expiry = if ttl_seconds > 0 {
+            self.get_timestamp() + (ttl_seconds * 1_000_000_000)
+        } else {
+            0
+        };
+
+        record.ttl_expiry.store(new_expiry, Ordering::Release);
+        Ok(())
+    }
+
+    /// Remove TTL from a key, making it persistent.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to persist
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    ///
+    /// # Errors
+    ///
+    /// * `KeyNotFound` - Key does not exist
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::builder().enable_ttl(true).build()?;
+    /// # store.insert_with_ttl(b"temp", b"data", 60)?;
+    /// // Remove TTL, make permanent
+    /// store.persist(b"temp")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn persist(&self, key: &[u8]) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.update_ttl(key, 0)
+    }
+
     /// Get the size of a value without loading it.
     ///
     /// Useful for checking value size before loading large values from disk.
@@ -1206,10 +1551,56 @@ impl FeoxStore {
     }
 
     fn get_timestamp(&self) -> u64 {
+        self.get_timestamp_pub()
+    }
+
+    /// Get current timestamp (public for TTL cleaner)
+    pub fn get_timestamp_pub(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64
+    }
+
+    /// Get access to hash table (for TTL cleaner)
+    pub(crate) fn get_hash_table(&self) -> &DashMap<Vec<u8>, Arc<Record>> {
+        &self.hash_table
+    }
+
+    /// Remove from tree (for TTL cleaner)
+    pub(crate) fn remove_from_tree(&self, key: &[u8]) {
+        self.tree.remove(key);
+    }
+
+    /// Get write buffer (for TTL cleaner)
+    pub(crate) fn get_write_buffer(&self) -> Option<&Arc<WriteBuffer>> {
+        self.write_buffer.as_ref()
+    }
+
+    /// Start the TTL sweeper if configured
+    /// This must be called with an Arc<Self> after construction
+    pub fn start_ttl_sweeper(self: &Arc<Self>, config: Option<TtlConfig>) {
+        // Only start TTL sweeper if TTL is enabled
+        if !self.enable_ttl {
+            return;
+        }
+
+        let ttl_config = config.unwrap_or_else(|| {
+            if self.memory_only {
+                TtlConfig::default_memory()
+            } else {
+                TtlConfig::default_persistent()
+            }
+        });
+
+        if ttl_config.enabled {
+            let weak_store = Arc::downgrade(self);
+            let mut sweeper = TtlSweeper::new(weak_store, ttl_config);
+            sweeper.start();
+
+            // Store the sweeper
+            *self.ttl_sweeper.write() = Some(sweeper);
+        }
     }
 
     fn load_value_from_disk(&self, record: &Record) -> Result<Vec<u8>> {
@@ -1218,8 +1609,12 @@ impl FeoxStore {
             return Err(FeoxError::InvalidRecord);
         }
 
+        // Get the appropriate format handler
+        let metadata_version = self._metadata.read().version;
+        let format = get_format(metadata_version);
+
         // Calculate how many sectors we need to read
-        let total_size = SECTOR_HEADER_SIZE + 2 + record.key.len() + 8 + 8 + record.value_len;
+        let total_size = format.total_size(record.key.len(), record.value_len);
         let sectors_needed = total_size.div_ceil(FEOX_BLOCK_SIZE);
 
         // Read the sectors
@@ -1236,8 +1631,8 @@ impl FeoxStore {
 
         let data = disk_io.read_sectors_sync(sector, sectors_needed as u64)?;
 
-        // Skip header and record metadata to get to the value
-        let offset = SECTOR_HEADER_SIZE + 2 + record.key.len() + 8 + 8;
+        // Use format to get the value offset
+        let offset = format.value_offset(record.key.len());
         if offset + record.value_len > data.len() {
             return Err(FeoxError::InvalidRecord);
         }
@@ -1389,6 +1784,11 @@ impl FeoxStore {
                 let signature = &metadata_data[..FEOX_SIGNATURE_SIZE];
 
                 if signature == FEOX_SIGNATURE {
+                    // Parse and store metadata
+                    if let Some(metadata) = Metadata::from_bytes(&metadata_data) {
+                        *self._metadata.write() = metadata;
+                    }
+
                     // Valid metadata found, scan the disk to rebuild indexes
                     self.scan_and_rebuild_indexes()?;
                 }
@@ -1404,6 +1804,10 @@ impl FeoxStore {
         }
 
         let disk_io = self.disk_io.as_ref().ok_or(FeoxError::NoDevice)?;
+
+        // Get the appropriate format handler
+        let metadata_version = self._metadata.read().version;
+        let format = get_format(metadata_version);
 
         let total_sectors = self.device_size / FEOX_BLOCK_SIZE as u64;
         let mut sector: u64 = 1;
@@ -1444,56 +1848,38 @@ impl FeoxStore {
                 continue;
             }
 
-            let key_len =
-                u16::from_le_bytes([data[SECTOR_HEADER_SIZE], data[SECTOR_HEADER_SIZE + 1]])
-                    as usize;
+            // Parse the record using format trait
+            let (key, value_len, timestamp, ttl_expiry) = match format.parse_record(&data) {
+                Some(parsed) => parsed,
+                None => {
+                    sector += 1;
+                    continue;
+                }
+            };
 
-            if key_len == 0 || key_len > MAX_KEY_SIZE {
+            if key.is_empty() || key.len() > MAX_KEY_SIZE {
                 sector += 1;
                 continue;
             }
 
-            if data.len() < SECTOR_HEADER_SIZE + 2 + key_len + 8 + 8 {
-                sector += 1;
-                continue;
-            }
-
-            let mut offset = SECTOR_HEADER_SIZE + 2;
-            let key = data[offset..offset + key_len].to_vec();
-            offset += key_len;
-
-            let value_len = u64::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]) as usize;
-            offset += 8;
-
-            let timestamp = u64::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-
-            let total_size = SECTOR_HEADER_SIZE + 2 + key_len + 8 + 8 + value_len;
+            // Calculate total size using format trait
+            let total_size = format.total_size(key.len(), value_len);
             let sectors_needed = total_size.div_ceil(FEOX_BLOCK_SIZE);
 
             let mut record = Record::new(key.clone(), Vec::new(), timestamp);
             record.sector.store(sector, Ordering::Release);
             record.value_len = value_len;
+            record.ttl_expiry.store(ttl_expiry, Ordering::Release);
             record.clear_value();
 
+            // Skip expired records during load if TTL is enabled
+            if self.enable_ttl && ttl_expiry > 0 && self.get_timestamp() > ttl_expiry {
+                sector += sectors_needed as u64;
+                continue;
+            }
+
             let record_arc = Arc::new(record);
+            let key_len = key.len();
             self.hash_table.insert(key.clone(), Arc::clone(&record_arc));
             self.tree.insert(key, Arc::clone(&record_arc));
 
@@ -1575,6 +1961,11 @@ impl FeoxStore {
 
 impl Drop for FeoxStore {
     fn drop(&mut self) {
+        // Stop TTL sweeper if running
+        if let Some(mut sweeper) = self.ttl_sweeper.write().take() {
+            sweeper.stop();
+        }
+
         // Signal shutdown to write buffer workers
         if let Some(ref wb) = self.write_buffer {
             wb.initiate_shutdown();

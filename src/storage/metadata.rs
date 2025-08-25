@@ -2,7 +2,9 @@ use crate::constants::*;
 use std::mem;
 
 /// Metadata version - increment this when changing the metadata structure
-const METADATA_VERSION: u32 = 1;
+/// Version 1: Initial format
+/// Version 2: Added TTL support (8 bytes ttl_expiry field in records)
+const METADATA_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

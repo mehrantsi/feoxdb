@@ -135,10 +135,36 @@ fn main() -> feoxdb::Result<()> {
         .max_memory(2_000_000_000)  // 2GB limit
         .enable_caching(true)        // Enable CLOCK cache
         .hash_bits(20)               // 1M hash buckets
+        .enable_ttl(true)            // Enable TTL support
         .build()?;
     
     Ok(())
 }
+```
+
+### Time-To-Live (TTL) Support
+
+```rust
+use feoxdb::FeoxStore;
+
+// Enable TTL feature via builder
+let store = FeoxStore::builder()
+    .enable_ttl(true)
+    .build()?;
+
+// Set key to expire after 60 seconds
+store.insert_with_ttl(b"session:123", b"session_data", 60)?;
+
+// Check remaining TTL
+if let Some(ttl) = store.get_ttl(b"session:123")? {
+    println!("Session expires in {} seconds", ttl);
+}
+
+// Extend TTL to 120 seconds
+store.update_ttl(b"session:123", 120)?;
+
+// Remove TTL (make permanent)
+store.persist(b"session:123")?;
 ```
 
 ### Concurrent Access

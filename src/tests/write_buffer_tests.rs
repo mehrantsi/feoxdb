@@ -26,7 +26,7 @@ fn create_test_write_buffer() -> (WriteBuffer, Arc<Statistics>) {
 
     let stats = Arc::new(Statistics::new());
 
-    let wb = WriteBuffer::new(Arc::new(RwLock::new(disk_io)), free_space, stats.clone());
+    let wb = WriteBuffer::new(Arc::new(RwLock::new(disk_io)), free_space, stats.clone(), 2);
     (wb, stats)
 }
 

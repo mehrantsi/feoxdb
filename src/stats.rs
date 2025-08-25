@@ -42,6 +42,12 @@ pub struct Statistics {
     pub key_not_found_errors: AtomicU64,
     pub out_of_memory_errors: AtomicU64,
     pub io_errors: AtomicU64,
+
+    // TTL metrics
+    pub ttl_expired_lazy: AtomicU64,   // Keys expired during GET
+    pub ttl_expired_active: AtomicU64, // Keys expired by cleaner
+    pub ttl_cleaner_runs: AtomicU64,   // Cleaner iterations
+    pub keys_with_ttl: AtomicU64,      // Approximate count
 }
 
 impl Statistics {
@@ -86,6 +92,12 @@ impl Statistics {
             key_not_found_errors: AtomicU64::new(0),
             out_of_memory_errors: AtomicU64::new(0),
             io_errors: AtomicU64::new(0),
+
+            // TTL metrics
+            ttl_expired_lazy: AtomicU64::new(0),
+            ttl_expired_active: AtomicU64::new(0),
+            ttl_cleaner_runs: AtomicU64::new(0),
+            keys_with_ttl: AtomicU64::new(0),
         }
     }
 

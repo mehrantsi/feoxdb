@@ -8,25 +8,24 @@ use crate::constants::*;
 #[repr(C)]
 #[derive(Debug)]
 pub struct Record {
-    // Hash table link for intrusive list
-    pub hash_link: AtomicLink,
+    // Cache line 1 (64 bytes) - GET hot path
+    // These 3 fields are accessed together on EVERY GET operation
+    pub key: Vec<u8>,                              // 24 bytes
+    pub value: parking_lot::RwLock<Option<Bytes>>, // ~40 bytes (32 + Option overhead)
 
-    // Key and value data
-    pub key: Vec<u8>,
-    pub key_len: u16,
-    pub value: parking_lot::RwLock<Option<Bytes>>, // None when value is on disk
-    pub value_len: usize,
+    // Cache line 2 (64 bytes) - TTL and metadata
+    pub ttl_expiry: AtomicU64, // 8 bytes - checked on every GET
+    pub timestamp: u64,        // 8 bytes - checked on updates
+    pub value_len: usize,      // 8 bytes - used for size calcs
+    pub sector: AtomicU64,     // 8 bytes - for persistence
+    pub refcount: AtomicU32,   // 4 bytes - memory management
+    pub key_len: u16,          // 2 bytes - used with value_len
+    // Total so far: 40 bytes
 
-    // Metadata
-    pub timestamp: u64,
-    pub sector: AtomicU64, // Disk sector location (0 means in-memory only)
-
-    // Reference counting for RCU-style access
-    pub refcount: AtomicU32,
-
-    // Cache metadata
-    pub cache_ref_bit: AtomicU32,
-    pub cache_access_time: AtomicU64,
+    // Still in cache line 2 or start of line 3 - cold fields
+    pub hash_link: AtomicLink,        // 8 bytes - only for hash ops
+    pub cache_ref_bit: AtomicU32,     // 4 bytes - rarely used
+    pub cache_access_time: AtomicU64, // 8 bytes - rarely used
 }
 
 // Custom atomic link for lock-free hash table
@@ -91,14 +90,20 @@ impl Record {
         let value_bytes = Bytes::from(value);
 
         Self {
-            hash_link: AtomicLink::new(),
-            key_len,
+            // Cache line 1 - GET hot path
             key,
             value: parking_lot::RwLock::new(Some(value_bytes)),
-            value_len,
+
+            // Cache line 2 - TTL and metadata
+            ttl_expiry: AtomicU64::new(0),
             timestamp,
+            value_len,
             sector: AtomicU64::new(0),
             refcount: AtomicU32::new(1),
+            key_len,
+
+            // Cold fields
+            hash_link: AtomicLink::new(),
             cache_ref_bit: AtomicU32::new(0),
             cache_access_time: AtomicU64::new(0),
         }
@@ -106,6 +111,17 @@ impl Record {
 
     pub fn new_with_timestamp(key: Vec<u8>, value: Vec<u8>, timestamp: u64) -> Self {
         Self::new(key, value, timestamp)
+    }
+
+    pub fn new_with_timestamp_ttl(
+        key: Vec<u8>,
+        value: Vec<u8>,
+        timestamp: u64,
+        ttl_expiry: u64,
+    ) -> Self {
+        let record = Self::new(key, value, timestamp);
+        record.ttl_expiry.store(ttl_expiry, Ordering::Release);
+        record
     }
 
     pub fn calculate_size(&self) -> usize {

@@ -102,6 +102,7 @@
 //! let store = FeoxStore::builder()
 //!     .max_memory(1024 * 1024 * 1024)  // 1GB limit
 //!     .hash_bits(20)  // 1M hash buckets
+//!     .enable_ttl(true)  // Enable TTL support (default: false)
 //!     .build()?;
 //! # Ok(())
 //! # }
@@ -159,6 +160,33 @@
 //!
 //! // The document is now updated with the patches applied
 //! let updated = store.get(b"user:123")?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Time-To-Live (TTL) Support
+//! ```rust
+//! use feoxdb::FeoxStore;
+//!
+//! # fn main() -> feoxdb::Result<()> {
+//! // Enable TTL feature via builder
+//! let store = FeoxStore::builder()
+//!     .enable_ttl(true)
+//!     .build()?;
+//!
+//! // Set key to expire after 60 seconds
+//! store.insert_with_ttl(b"session:123", b"user_session", 60)?;
+//!
+//! // Check remaining TTL
+//! if let Some(ttl) = store.get_ttl(b"session:123")? {
+//!     println!("Session expires in {} seconds", ttl);
+//! }
+//!
+//! // Extend TTL to 120 seconds
+//! store.update_ttl(b"session:123", 120)?;
+//!
+//! // Remove TTL (make permanent)
+//! store.persist(b"session:123")?;
 //! # Ok(())
 //! # }
 //! ```
