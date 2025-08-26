@@ -14,6 +14,7 @@ pub struct StoreConfig {
     pub memory_only: bool,
     pub enable_caching: bool,
     pub device_path: Option<String>,
+    pub file_size: Option<u64>,
     pub max_memory: Option<usize>,
     pub enable_ttl: bool,
     pub ttl_config: Option<TtlConfig>,
@@ -40,6 +41,7 @@ pub struct StoreConfig {
 pub struct StoreBuilder {
     hash_bits: u32,
     device_path: Option<String>,
+    file_size: Option<u64>,
     max_memory: Option<usize>,
     enable_caching: Option<bool>,
     enable_ttl: bool,
@@ -51,6 +53,7 @@ impl StoreBuilder {
         Self {
             hash_bits: DEFAULT_HASH_BITS,
             device_path: None,
+            file_size: None,
             max_memory: Some(DEFAULT_MAX_MEMORY),
             enable_caching: None, // Disable caching for memory-only mode
             enable_ttl: false,
@@ -64,6 +67,30 @@ impl StoreBuilder {
     /// If not set, the store operates in memory-only mode.
     pub fn device_path(mut self, path: impl Into<String>) -> Self {
         self.device_path = Some(path.into());
+        self
+    }
+
+    /// Set the initial file size for new persistent stores (in bytes).
+    ///
+    /// When creating a new persistent store file, it will be pre-allocated
+    /// to this size for better performance. If not set, defaults to 1GB.
+    /// This option is ignored for existing files.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use feoxdb::FeoxStore;
+    ///
+    /// # fn main() -> feoxdb::Result<()> {
+    /// let store = FeoxStore::builder()
+    ///     .device_path("/path/to/data.feox")
+    ///     .file_size(10 * 1024 * 1024 * 1024)  // 10GB
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn file_size(mut self, size: u64) -> Self {
+        self.file_size = Some(size);
         self
     }
 
@@ -165,6 +192,7 @@ impl StoreBuilder {
             memory_only,
             enable_caching,
             device_path: self.device_path,
+            file_size: self.file_size,
             max_memory: self.max_memory,
             enable_ttl: self.enable_ttl,
             ttl_config: self.ttl_config,

@@ -95,11 +95,13 @@
 //! ```
 //!
 //! ### Using the Builder Pattern
-//! ```rust
+//! ```no_run
 //! use feoxdb::FeoxStore;
 //!
 //! # fn main() -> feoxdb::Result<()> {
 //! let store = FeoxStore::builder()
+//!     .device_path("/path/to/data.feox")
+//!     .file_size(5 * 1024 * 1024 * 1024)  // 5GB initial file size (default: 1GB)
 //!     .max_memory(1024 * 1024 * 1024)  // 1GB limit
 //!     .hash_bits(20)  // 1M hash buckets
 //!     .enable_ttl(true)  // Enable TTL support (default: false)

@@ -132,6 +132,7 @@ use feoxdb::FeoxStore;
 fn main() -> feoxdb::Result<()> {
     let store = FeoxStore::builder()
         .device_path("/data/myapp.feox")
+        .file_size(10 * 1024 * 1024 * 1024)  // 10GB initial file size
         .max_memory(2_000_000_000)  // 2GB limit
         .enable_caching(true)        // Enable CLOCK cache
         .hash_bits(20)               // 1M hash buckets
