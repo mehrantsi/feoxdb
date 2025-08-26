@@ -11,6 +11,7 @@ use crate::constants::*;
 use crate::core::record::Record;
 use crate::error::{FeoxError, Result};
 use crate::stats::Statistics;
+use crate::storage::format::{get_format, RecordFormat};
 use crate::storage::free_space::FreeSpaceManager;
 use crate::storage::io::DiskIO;
 
@@ -63,6 +64,9 @@ pub struct WriteBuffer {
 
     /// Shared statistics
     stats: Arc<Statistics>,
+
+    /// Format version for record serialization
+    format_version: u32,
 }
 
 #[derive(Debug)]
@@ -77,6 +81,7 @@ struct WorkerContext {
     sharded_buffers: Arc<Vec<CachePadded<ShardedWriteBuffer>>>,
     shutdown: Arc<AtomicBool>,
     stats: Arc<Statistics>,
+    format_version: u32,
 }
 
 impl ShardedWriteBuffer {
@@ -121,6 +126,7 @@ impl WriteBuffer {
         disk_io: Arc<RwLock<DiskIO>>,
         free_space: Arc<RwLock<FreeSpaceManager>>,
         stats: Arc<Statistics>,
+        format_version: u32,
     ) -> Self {
         // Use half CPU count for both shards and workers
         let num_shards = (num_cpus::get() / 2).max(1);
@@ -140,6 +146,7 @@ impl WriteBuffer {
             periodic_flush_handle: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             stats,
+            format_version,
         }
     }
 
@@ -202,6 +209,7 @@ impl WriteBuffer {
                 sharded_buffers: self.sharded_buffers.clone(),
                 shutdown: self.shutdown.clone(),
                 stats: self.stats.clone(),
+                format_version: self.format_version,
             };
             let flush_rx = receivers.pop().unwrap();
 
@@ -326,6 +334,7 @@ impl WriteBuffer {
 /// Background worker for processing write buffer flushes
 fn write_buffer_worker(ctx: WorkerContext, flush_rx: Receiver<FlushRequest>) {
     let worker_id = ctx.worker_id;
+    let format = get_format(ctx.format_version);
 
     loop {
         if ctx.shutdown.load(Ordering::Acquire) {
@@ -350,8 +359,13 @@ fn write_buffer_worker(ctx: WorkerContext, flush_rx: Receiver<FlushRequest>) {
 
             if !entries.is_empty() {
                 // Process writes for this shard
-                let result =
-                    process_write_batch(&ctx.disk_io, &ctx.free_space, entries, &ctx.stats);
+                let result = process_write_batch(
+                    &ctx.disk_io,
+                    &ctx.free_space,
+                    entries,
+                    &ctx.stats,
+                    format.as_ref(),
+                );
 
                 ctx.stats.flush_count.fetch_add(1, Ordering::Relaxed);
 
@@ -372,7 +386,13 @@ fn write_buffer_worker(ctx: WorkerContext, flush_rx: Receiver<FlushRequest>) {
         let final_entries = buffer.drain_entries();
 
         if !final_entries.is_empty() {
-            let _ = process_write_batch(&ctx.disk_io, &ctx.free_space, final_entries, &ctx.stats);
+            let _ = process_write_batch(
+                &ctx.disk_io,
+                &ctx.free_space,
+                final_entries,
+                &ctx.stats,
+                format.as_ref(),
+            );
         }
     }
 }
@@ -383,6 +403,7 @@ fn process_write_batch(
     free_space: &Arc<RwLock<FreeSpaceManager>>,
     entries: Vec<WriteEntry>,
     stats: &Arc<Statistics>,
+    format: &dyn RecordFormat,
 ) -> Result<()> {
     let mut batch_writes = Vec::new();
     let mut delete_operations = Vec::new();
@@ -396,7 +417,7 @@ fn process_write_batch(
                 if entry.record.refcount.load(Ordering::Acquire) > 0
                     && entry.record.sector.load(Ordering::Acquire) == 0
                 {
-                    let data = prepare_record_data(&entry.record)?;
+                    let data = prepare_record_data(&entry.record, format)?;
                     let sectors_needed = data.len().div_ceil(FEOX_BLOCK_SIZE);
                     let sector = free_space.write().allocate_sectors(sectors_needed as u64)?;
 
@@ -488,8 +509,9 @@ fn process_write_batch(
     Ok(())
 }
 
-fn prepare_record_data(record: &Record) -> Result<Vec<u8>> {
-    let total_size = SECTOR_HEADER_SIZE + 2 + record.key.len() + 8 + 8 + record.value_len;
+fn prepare_record_data(record: &Record, format: &dyn RecordFormat) -> Result<Vec<u8>> {
+    // Get the total size using the format trait
+    let total_size = format.total_size(record.key.len(), record.value_len);
 
     // Calculate padded size to sector boundary
     let sectors_needed = total_size.div_ceil(FEOX_BLOCK_SIZE);
@@ -501,15 +523,9 @@ fn prepare_record_data(record: &Record) -> Result<Vec<u8>> {
     data.extend_from_slice(&SECTOR_MARKER.to_le_bytes());
     data.extend_from_slice(&0u16.to_le_bytes()); // seq_number
 
-    // Record data
-    data.extend_from_slice(&(record.key.len() as u16).to_le_bytes());
-    data.extend_from_slice(&record.key);
-    data.extend_from_slice(&(record.value_len as u64).to_le_bytes());
-    data.extend_from_slice(&record.timestamp.to_le_bytes());
-
-    if let Some(value) = record.get_value() {
-        data.extend_from_slice(value.as_ref());
-    }
+    // Use format trait to serialize the record
+    let record_data = format.serialize_record(record, true);
+    data.extend_from_slice(&record_data);
 
     // Pad to sector boundary
     data.resize(padded_size, 0);

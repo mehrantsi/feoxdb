@@ -104,6 +104,9 @@ pub enum FeoxError {
 
     #[error("Duplicate key")]
     DuplicateKey,
+
+    #[error("TTL feature is not enabled")]
+    TtlNotEnabled,
 }
 
 pub type Result<T> = std::result::Result<T, FeoxError>;
