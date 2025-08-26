@@ -1,7 +1,7 @@
 // Test modules for FeOxDB
 
 #[cfg(test)]
-pub mod store_tests;
+pub mod store;
 
 #[cfg(test)]
 pub mod cache_tests;
