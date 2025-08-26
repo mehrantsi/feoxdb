@@ -204,26 +204,79 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        println!("Usage: {} <num_keys> [value_size] [--persist]", args[0]);
-        println!("  num_keys: Number of keys to test (will insert, get, then delete all)");
-        println!("  value_size: Value size in bytes (default: 300)");
-        println!("  --persist: Use persistent storage");
+        println!(
+            "Usage: {} <num_keys> [value_size] [--persist] [--file <path>]",
+            args[0]
+        );
+        println!("  num_keys:    Number of keys to test (will insert, get, then delete all)");
+        println!("  value_size:  Value size in bytes (default: 300)");
+        println!("  --persist:   Use persistent storage with default temp file");
+        println!("  --file <path>: Use custom persistence file (must exist)");
+        println!();
+        println!("Examples:");
+        println!("  {} 100000", args[0]);
+        println!("  {} 100000 500 --persist", args[0]);
+        println!("  {} 100000 500 --file /path/to/custom.dat", args[0]);
+        println!();
+        println!("Creating a custom persistence file:");
+        println!("  # Create a 100MB file:");
+        println!("  dd if=/dev/zero of=test.dat bs=1M count=100");
+        println!();
+        println!("  # Create a 1GB file:");
+        println!("  dd if=/dev/zero of=test.dat bs=1G count=1");
         return Ok(());
     }
 
     let num_keys = args[1].parse::<usize>().unwrap_or(100_000);
-    let value_size = args
-        .get(2)
-        .and_then(|s| {
-            if s == "--persist" {
-                None
-            } else {
-                s.parse().ok()
-            }
-        })
-        .unwrap_or(300);
 
-    let use_persistence = args.iter().any(|arg| arg == "--persist");
+    // Parse value_size (handle it being --persist or --file)
+    let mut value_size = 300;
+    let mut custom_file: Option<String> = None;
+    let mut use_persistence = false;
+
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--persist" {
+            use_persistence = true;
+        } else if args[i] == "--file" {
+            if i + 1 < args.len() {
+                custom_file = Some(args[i + 1].clone());
+                use_persistence = true;
+                i += 1; // Skip the file path argument
+            } else {
+                eprintln!("Error: --file requires a path argument");
+                return Ok(());
+            }
+        } else if let Ok(size) = args[i].parse::<usize>() {
+            value_size = size;
+        }
+        i += 1;
+    }
+
+    // Validate custom file if specified
+    if let Some(ref file_path) = custom_file {
+        use std::path::Path;
+        if !Path::new(file_path).exists() {
+            eprintln!(
+                "Error: Custom persistence file '{}' does not exist",
+                file_path
+            );
+            eprintln!();
+            eprintln!("Please create the file first. Example:");
+            eprintln!("  dd if=/dev/zero of={} bs=1M count=100", file_path);
+            return Ok(());
+        }
+
+        // Display file size info
+        use std::fs;
+        if let Ok(metadata) = fs::metadata(file_path) {
+            let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+            println!(
+                "Using custom persistence file: {} ({:.2} MB)",
+                file_path, size_mb
+            );
+        }
+    }
 
     // Display configuration
     println!(
@@ -239,7 +292,11 @@ fn main() -> Result<()> {
     println!(
         "Mode: {}",
         if use_persistence {
-            "Persistent"
+            if custom_file.is_some() {
+                "Persistent (custom file)"
+            } else {
+                "Persistent (default temp)"
+            }
         } else {
             "Memory"
         }
@@ -250,7 +307,9 @@ fn main() -> Result<()> {
     );
 
     // Initialize store
-    let device_path = if use_persistence {
+    let device_path = if let Some(custom) = custom_file {
+        Some(custom)
+    } else if use_persistence {
         #[cfg(unix)]
         let path = "/tmp/feox_deterministic_test.dat".to_string();
 
@@ -397,8 +456,7 @@ fn main() -> Result<()> {
     // If using persistence, ensure data is flushed
     if use_persistence {
         print!("\n{}Flushing to disk...{} ", ANSI_YELLOW, ANSI_RESET);
-        // Note: flush() doesn't return a Result in current implementation
-        // store.flush();
+        store.flush();
         println!("{}Done!{}", ANSI_GREEN, ANSI_RESET);
     }
 

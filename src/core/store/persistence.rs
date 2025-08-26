@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read, Seek};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -85,7 +85,11 @@ impl FeoxStore {
         Ok(data[offset..offset + record.value_len].to_vec())
     }
 
-    pub(super) fn open_device(&mut self, device_path: &Option<String>) -> Result<()> {
+    pub(super) fn open_device(
+        &mut self,
+        device_path: &Option<String>,
+        file_size: Option<u64>,
+    ) -> Result<()> {
         if let Some(path) = device_path {
             // Open the device/file
             use std::fs::OpenOptions;
@@ -159,10 +163,10 @@ impl FeoxStore {
             let was_newly_created = self.device_size == 0;
 
             if was_newly_created {
-                // New empty file - set default size and initialize free space
-                file.set_len(DEFAULT_DEVICE_SIZE)
-                    .map_err(FeoxError::IoError)?;
-                self.device_size = DEFAULT_DEVICE_SIZE;
+                // New empty file - set configured size or default and initialize free space
+                let target_size = file_size.unwrap_or(DEFAULT_DEVICE_SIZE);
+                file.set_len(target_size).map_err(FeoxError::IoError)?;
+                self.device_size = target_size;
 
                 // Initialize free space manager with all space free
                 self.free_space.write().initialize(self.device_size)?;
@@ -171,8 +175,33 @@ impl FeoxStore {
                 metadata.device_size = self.device_size;
                 metadata.update();
             } else {
-                // Existing file - just set device size, free space will be rebuilt during scan
-                self.free_space.write().set_device_size(self.device_size);
+                // Existing file - check if it's empty
+                // If empty, initialize free space; otherwise it will be rebuilt during scan
+                let is_empty_file = {
+                    let mut temp_file = file.try_clone().map_err(FeoxError::IoError)?;
+                    temp_file
+                        .metadata()
+                        .map(|m| {
+                            // Check if file is all zeros
+                            if m.len() > 0 {
+                                let mut buffer = vec![0u8; std::cmp::min(4096, m.len() as usize)];
+                                temp_file.seek(std::io::SeekFrom::Start(0)).ok();
+                                temp_file.read_exact(&mut buffer).ok();
+                                buffer.iter().all(|&b| b == 0)
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false)
+                };
+
+                if is_empty_file {
+                    // Empty pre-created file - initialize free space like a new file
+                    self.free_space.write().initialize(self.device_size)?;
+                } else {
+                    // Existing file with data - free space will be rebuilt during scan
+                    self.free_space.write().set_device_size(self.device_size);
+                }
             }
 
             #[cfg(unix)]

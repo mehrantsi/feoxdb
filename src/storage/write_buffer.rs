@@ -211,6 +211,8 @@ impl WriteBuffer {
                 stats: self.stats.clone(),
                 format_version: self.format_version,
             };
+
+            // Note: pop() gives us receivers in reverse order, so worker N gets receiver 0
             let flush_rx = receivers.pop().unwrap();
 
             let handle = thread::spawn(move || {
@@ -233,10 +235,12 @@ impl WriteBuffer {
 
                 // Check each shard and trigger its worker if needed
                 for (shard_id, buffer) in sharded_buffers.iter().enumerate() {
-                    if buffer.count.load(Ordering::Relaxed) > 0 && shard_id < worker_channels.len()
-                    {
+                    let count = buffer.count.load(Ordering::Relaxed);
+                    if count > 0 && shard_id < worker_channels.len() {
                         let req = FlushRequest { response: None };
-                        let _ = worker_channels[shard_id].try_send(req);
+                        // Workers were assigned channels in reverse order due to pop()
+                        let channel_idx = worker_channels.len() - 1 - shard_id;
+                        let _ = worker_channels[channel_idx].try_send(req);
                     }
                 }
             }

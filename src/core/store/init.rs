@@ -21,6 +21,7 @@ impl FeoxStore {
             memory_only,
             enable_caching: !memory_only, // Disable caching for memory-only mode
             device_path,
+            file_size: None,
             max_memory: Some(DEFAULT_MAX_MEMORY),
             enable_ttl: false,
             ttl_config: None,
@@ -58,7 +59,7 @@ impl FeoxStore {
         };
 
         if !config.memory_only {
-            store.open_device(&config.device_path)?;
+            store.open_device(&config.device_path, config.file_size)?;
             store.load_indexes()?;
 
             // Initialize write buffer for persistent mode
@@ -111,7 +112,7 @@ impl FeoxStore {
         };
 
         if !config.memory_only {
-            store.open_device(&config.device_path)?;
+            store.open_device(&config.device_path, config.file_size)?;
             store.load_indexes()?;
 
             // Initialize write buffer for persistent mode
