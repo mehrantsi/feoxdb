@@ -148,7 +148,6 @@ impl Statistics {
 
     pub fn record_write_flushed(&self, count: u64) {
         self.writes_flushed.fetch_add(count, Ordering::Relaxed);
-        self.flush_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_write_failed(&self) {
