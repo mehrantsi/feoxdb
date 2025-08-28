@@ -27,7 +27,7 @@
 //! - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 //! - **Flexible Storage**: Memory-only or persistent modes with async I/O
 //! - **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
-//! - **Atomic Operations**: Increment/decrement counters atomically
+//! - **Atomic Operations**: Compare-and-swap (CAS) and atomic counters
 //! - **CLOCK Cache**: Efficient cache eviction algorithm
 //! - **Write Buffering**: Batched writes with sharded buffers to reduce contention
 //! - **Statistics**: Real-time performance metrics and monitoring
@@ -219,6 +219,30 @@
 //! # }
 //! ```
 //!
+//! ### Compare-and-Swap (CAS) Operations
+//! ```rust
+//! use feoxdb::FeoxStore;
+//!
+//! # fn main() -> feoxdb::Result<()> {
+//! let store = FeoxStore::new(None)?;
+//!
+//! // Insert initial configuration
+//! store.insert(b"config:version", b"v1.0")?;
+//!
+//! // Atomically update only if value matches expected
+//! let swapped = store.compare_and_swap(b"config:version", b"v1.0", b"v2.0")?;
+//! assert!(swapped); // Returns true if swap succeeded
+//!
+//! // This CAS will fail because current value is now "v2.0"
+//! let swapped = store.compare_and_swap(b"config:version", b"v1.0", b"v3.0")?;
+//! assert!(!swapped); // Returns false if current value didn't match
+//!
+//! // CAS enables optimistic concurrency control for safe updates
+//! // Multiple threads can attempt CAS - only one will succeed
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Timestamps and Consistency
 //!
 //! FeOxDB uses timestamps for conflict resolution and consistency:
@@ -247,9 +271,6 @@
 //! ```bash
 //! # Criterion benchmarks for detailed latency analysis
 //! cargo bench
-//!
-//! # Throughput test (100k operations, 100 byte values)
-//! cargo run --release --example performance_test 100000 100
 //!
 //! # Deterministic test for reproducible results
 //! cargo run --release --example deterministic_test 100000 100

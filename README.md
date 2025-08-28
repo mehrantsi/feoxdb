@@ -13,7 +13,7 @@
 - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 - **Flexible Storage**: Memory-only or persistent modes with async I/O
 - **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
-- **Atomic Counters**: Thread-safe increment/decrement operations
+- **Atomic Operations**: Compare-and-Swap (CAS) and atomic counters
 - **Write Buffering**: Sharded buffers with batched writes to reduce contention
 - **CLOCK Cache**: Second-chance eviction algorithm
 - **Statistics**: Real-time performance monitoring
@@ -227,6 +227,79 @@ fn main() -> feoxdb::Result<()> {
 }
 ```
 
+### Compare-and-Swap (CAS) Operations
+
+FeOxDB provides atomic Compare-and-Swap operations for implementing optimistic concurrency control:
+
+```rust
+use feoxdb::FeoxStore;
+use std::sync::{Arc, Barrier};
+use std::thread;
+
+fn main() -> feoxdb::Result<()> {
+    let store = Arc::new(FeoxStore::new(None)?);
+    
+    // Multiple servers processing orders concurrently
+    
+    store.insert(b"product:iPhone16:stock", b"50")?; // Initial stock
+    let barrier = Arc::new(Barrier::new(5));
+    let mut handles = vec![];
+    
+    for order_id in 0..5 {
+        let store_clone = Arc::clone(&store);
+        let barrier_clone = Arc::clone(&barrier);
+        
+        handles.push(thread::spawn(move || -> feoxdb::Result<bool> {
+            barrier_clone.wait(); // Start all orders simultaneously
+            
+            let quantity_requested = 10;
+            
+            // Try to reserve inventory atomically
+            let current = store_clone.get(b"product:iPhone16:stock")?;
+            let stock: u32 = String::from_utf8_lossy(&current)
+                .parse()
+                .unwrap_or(0);
+            
+            if stock >= quantity_requested {
+                let new_stock = (stock - quantity_requested).to_string();
+                
+                // Attempt atomic update
+                if store_clone.compare_and_swap(
+                    b"product:iPhone16:stock", 
+                    &current, 
+                    new_stock.as_bytes()
+                )? {
+                    return Ok(true); // Successfully reserved
+                }
+            }
+            
+            Ok(false) // Failed - insufficient stock or lost race
+        }));
+    }
+    
+    let successful_orders: Vec<bool> = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().unwrap())
+        .collect();
+    
+    // With single-attempt CAS, some orders may fail due to races
+    // Typically 3-4 orders succeed out of 5
+    let successful_count = successful_orders.iter().filter(|&&x| x).count();
+    println!("Successful orders: {}/5", successful_count);
+    
+    let final_stock = store.get(b"product:iPhone16:stock")?;
+    println!("Final stock: {}", String::from_utf8_lossy(&final_stock));
+    
+    Ok(())
+}
+```
+
+CAS operations enable:
+- **Optimistic concurrency control** - Update only if value hasn't changed
+- **Lock-free updates** - No mutexes or blocking required
+- **Atomic state transitions** - Safely move between states without races
+- **Fast conflict detection** - Immediate failure when values don't match
+
 ### JSON Patch Operations (RFC 6902)
 
 FeOxDB supports partial updates to JSON documents using the standard JSON Patch format:
@@ -311,9 +384,6 @@ fn main() -> feoxdb::Result<()> {
 Run the included benchmarks:
 
 ```bash
-# Performance test
-cargo run --release --example performance_test 100000 100
-
 # Deterministic test
 cargo run --release --example deterministic_test 100000 100
 
@@ -416,7 +486,8 @@ Key types:
 
 See the `examples/` directory for more:
 
-- `performance_test.rs` - Benchmark tool
+- `basic_usage.rs` - Basic usage example
+- `cas_example.rs` - Compare-and-swap (CAS) example
 - `deterministic_test.rs` - Reproducible performance test
 
 ### Contributing

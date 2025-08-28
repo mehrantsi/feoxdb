@@ -67,7 +67,7 @@ impl FeoxStore {
     /// # }
     /// ```
     pub fn atomic_increment(&self, key: &[u8], delta: i64) -> Result<i64> {
-        self.atomic_increment_with_timestamp(key, delta, None)
+        self.atomic_increment_with_timestamp_and_ttl(key, delta, None, 0)
     }
 
     /// Atomically increment/decrement with explicit timestamp.
@@ -89,6 +89,48 @@ impl FeoxStore {
         key: &[u8],
         delta: i64,
         timestamp: Option<u64>,
+    ) -> Result<i64> {
+        self.atomic_increment_with_timestamp_and_ttl(key, delta, timestamp, 0)
+    }
+
+    /// Atomically increment/decrement with TTL support.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to increment/decrement
+    /// * `delta` - Amount to add (negative to decrement)
+    /// * `ttl_seconds` - Time-to-live in seconds (0 for no expiry)
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidOperation` - Value is not a valid i64
+    pub fn atomic_increment_with_ttl(
+        &self,
+        key: &[u8],
+        delta: i64,
+        ttl_seconds: u64,
+    ) -> Result<i64> {
+        self.atomic_increment_with_timestamp_and_ttl(key, delta, None, ttl_seconds)
+    }
+
+    /// Atomically increment/decrement with explicit timestamp and TTL.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to increment/decrement
+    /// * `delta` - Amount to add (negative to decrement)
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    /// * `ttl_seconds` - Time-to-live in seconds (0 for no expiry)
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn atomic_increment_with_timestamp_and_ttl(
+        &self,
+        key: &[u8],
+        delta: i64,
+        timestamp: Option<u64>,
+        ttl_seconds: u64,
     ) -> Result<i64> {
         self.validate_key(key)?;
 
@@ -131,9 +173,18 @@ impl FeoxStore {
                 let new_val = current_val.saturating_add(delta);
                 let new_value = new_val.to_le_bytes().to_vec();
 
-                // Create new record
-                let new_record =
-                    Arc::new(Record::new(old_record.key.clone(), new_value, timestamp));
+                // Create new record with TTL if specified
+                let new_record = if ttl_seconds > 0 {
+                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
+                    Arc::new(Record::new_with_timestamp_ttl(
+                        old_record.key.clone(),
+                        new_value,
+                        timestamp,
+                        ttl_expiry,
+                    ))
+                } else {
+                    Arc::new(Record::new(old_record.key.clone(), new_value, timestamp))
+                };
 
                 let old_value_len = old_record.value_len;
                 let old_size = old_record.calculate_size();
@@ -195,7 +246,18 @@ impl FeoxStore {
                 let initial_val = delta;
                 let value = initial_val.to_le_bytes().to_vec();
 
-                let new_record = Arc::new(Record::new(key_vec.clone(), value, timestamp));
+                // Create new record with TTL if specified
+                let new_record = if ttl_seconds > 0 {
+                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
+                    Arc::new(Record::new_with_timestamp_ttl(
+                        key_vec.clone(),
+                        value,
+                        timestamp,
+                        ttl_expiry,
+                    ))
+                } else {
+                    Arc::new(Record::new(key_vec.clone(), value, timestamp))
+                };
 
                 entry.insert(Arc::clone(&new_record));
 
@@ -225,5 +287,240 @@ impl FeoxStore {
         };
 
         result
+    }
+
+    /// Atomically compare and swap a value.
+    ///
+    /// Compares the current value of a key with an expected value, and if they match,
+    /// atomically replaces it with a new value. This operation is atomic within the
+    /// HashMap shard, preventing race conditions.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check and potentially update
+    /// * `expected` - The expected current value
+    /// * `new_value` - The new value to set if comparison succeeds
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if the swap succeeded (current value matched expected).
+    /// Returns `Ok(false)` if the current value didn't match or key doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidKeySize` - Key is invalid
+    /// * `InvalidValueSize` - New value is too large
+    /// * `OutOfMemory` - Memory limit exceeded
+    /// * `IoError` - Failed to read value from disk
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::new(None)?;
+    /// store.insert(b"config", b"v1")?;
+    ///
+    /// // Successful CAS - value matches
+    /// let swapped = store.compare_and_swap(b"config", b"v1", b"v2")?;
+    /// assert_eq!(swapped, true);
+    ///
+    /// // Failed CAS - value doesn't match
+    /// let swapped = store.compare_and_swap(b"config", b"v1", b"v3")?;
+    /// assert_eq!(swapped, false); // Value is now "v2", not "v1"
+    ///
+    /// // CAS on non-existent key
+    /// let swapped = store.compare_and_swap(b"missing", b"any", b"new")?;
+    /// assert_eq!(swapped, false);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn compare_and_swap(&self, key: &[u8], expected: &[u8], new_value: &[u8]) -> Result<bool> {
+        self.compare_and_swap_with_timestamp_and_ttl(key, expected, new_value, None, 0)
+    }
+
+    /// Compare and swap with explicit timestamp.
+    ///
+    /// This is the advanced version that allows manual timestamp control for
+    /// conflict resolution. Most users should use `compare_and_swap()` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check and potentially update
+    /// * `expected` - The expected current value
+    /// * `new_value` - The new value to set if comparison succeeds
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn compare_and_swap_with_timestamp(
+        &self,
+        key: &[u8],
+        expected: &[u8],
+        new_value: &[u8],
+        timestamp: Option<u64>,
+    ) -> Result<bool> {
+        self.compare_and_swap_with_timestamp_and_ttl(key, expected, new_value, timestamp, 0)
+    }
+
+    /// Compare and swap with TTL support.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check and potentially update
+    /// * `expected` - The expected current value
+    /// * `new_value` - The new value to set if comparison succeeds
+    /// * `ttl_seconds` - Time-to-live in seconds (0 for no expiry)
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidKeySize` - Key is invalid
+    /// * `InvalidValueSize` - New value is too large
+    pub fn compare_and_swap_with_ttl(
+        &self,
+        key: &[u8],
+        expected: &[u8],
+        new_value: &[u8],
+        ttl_seconds: u64,
+    ) -> Result<bool> {
+        self.compare_and_swap_with_timestamp_and_ttl(key, expected, new_value, None, ttl_seconds)
+    }
+
+    /// Compare and swap with explicit timestamp and TTL.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check and potentially update
+    /// * `expected` - The expected current value
+    /// * `new_value` - The new value to set if comparison succeeds
+    /// * `timestamp` - Optional timestamp. If `None`, uses current time.
+    /// * `ttl_seconds` - Time-to-live in seconds (0 for no expiry)
+    ///
+    /// # Errors
+    ///
+    /// * `OlderTimestamp` - Timestamp is not newer than existing record
+    pub fn compare_and_swap_with_timestamp_and_ttl(
+        &self,
+        key: &[u8],
+        expected: &[u8],
+        new_value: &[u8],
+        timestamp: Option<u64>,
+        ttl_seconds: u64,
+    ) -> Result<bool> {
+        let start = std::time::Instant::now();
+        self.validate_key_value(key, new_value)?;
+        let key_vec = key.to_vec();
+
+        // Phase 1: Check value and save record reference for version tracking
+        let initial_record = {
+            let entry = match self.hash_table.get(&key_vec) {
+                Some(e) => e,
+                None => return Ok(false), // Key doesn't exist
+            };
+
+            let record = entry.value();
+            let record_arc = Arc::clone(record);
+
+            // Check if value matches expected
+            let value_matches = if let Some(val) = record.get_value() {
+                // Fast path: value in memory
+                val.as_ref() == expected
+            } else {
+                // Need disk I/O
+                drop(entry); // Release read lock before disk I/O
+
+                let disk_value = self.load_value_from_disk(&record_arc)?;
+                disk_value == expected
+            };
+
+            if !value_matches {
+                return Ok(false); // Value doesn't match expected
+            }
+
+            // Return the Arc pointer itself as our version identifier
+            // NOTE: We can't use the stored timestamp for verification here because
+            // SystemTime::now() resolution is 1us, which is too coarse for CAS operations.
+            record_arc
+        };
+
+        // Phase 2: Acquire write lock and verify record hasn't changed
+        match self.hash_table.entry(key_vec.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let old_record = entry.get();
+
+                // Check if the record is still the same one we read earlier
+                if !Arc::ptr_eq(old_record, &initial_record) {
+                    // Record was modified between our check and acquiring lock
+                    return Ok(false);
+                }
+
+                let timestamp = match timestamp {
+                    Some(0) | None => self.get_timestamp(),
+                    Some(ts) => ts,
+                };
+
+                if timestamp < old_record.timestamp {
+                    return Err(FeoxError::OlderTimestamp);
+                }
+
+                let old_size = old_record.calculate_size();
+                let new_size = self.calculate_record_size(key.len(), new_value.len());
+                let old_value_len = old_record.value_len;
+                let old_record_arc = Arc::clone(old_record);
+
+                // Pre-check memory limit
+                if new_size > old_size && !self.check_memory_limit(new_size - old_size) {
+                    return Err(FeoxError::OutOfMemory);
+                }
+
+                // Create new record with TTL if specified
+                let new_record = if ttl_seconds > 0 {
+                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
+                    Arc::new(Record::new_with_timestamp_ttl(
+                        key.to_vec(),
+                        new_value.to_vec(),
+                        timestamp,
+                        ttl_expiry,
+                    ))
+                } else {
+                    Arc::new(Record::new(key.to_vec(), new_value.to_vec(), timestamp))
+                };
+
+                entry.insert(Arc::clone(&new_record));
+                drop(entry); // Release lock
+
+                self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
+
+                if new_size > old_size {
+                    self.stats
+                        .memory_usage
+                        .fetch_add(new_size - old_size, Ordering::AcqRel);
+                } else {
+                    self.stats
+                        .memory_usage
+                        .fetch_sub(old_size - new_size, Ordering::AcqRel);
+                }
+
+                self.stats
+                    .record_insert(start.elapsed().as_nanos() as u64, true);
+
+                if !self.memory_only {
+                    if self.enable_caching {
+                        if let Some(ref cache) = self.cache {
+                            cache.remove(&key_vec);
+                        }
+                    }
+
+                    if let Some(ref wb) = self.write_buffer {
+                        let _ = wb.add_write(Operation::Update, new_record, old_value_len);
+                        let _ = wb.add_write(Operation::Delete, old_record_arc, old_value_len);
+                    }
+                }
+
+                Ok(true)
+            }
+            dashmap::mapref::entry::Entry::Vacant(_) => Ok(false),
+        }
     }
 }
