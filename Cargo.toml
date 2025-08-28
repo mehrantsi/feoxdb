@@ -1,6 +1,6 @@
 [package]
 name = "feoxdb"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Mehran Toosi <dev@mehran.dk>"]
 description = "Iron-oxide fast embedded database - nanosecond-level key-value storage"
@@ -76,11 +76,10 @@ persistent = []
 name = "basic_usage"
 
 [[example]]
-name = "performance_test"
-
-[[example]]
 name = "deterministic_test"
 
+[[example]]
+name = "cas_example"
 
 [[bench]]
 name = "throughput"
