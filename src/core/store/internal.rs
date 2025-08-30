@@ -1,3 +1,4 @@
+use ahash::RandomState;
 use bytes::Bytes;
 use scc::HashMap;
 use std::sync::atomic::Ordering;
@@ -163,7 +164,7 @@ impl FeoxStore {
     }
 
     /// Get access to hash table (for TTL cleaner)
-    pub(crate) fn get_hash_table(&self) -> &HashMap<Vec<u8>, Arc<Record>> {
+    pub(crate) fn get_hash_table(&self) -> &HashMap<Vec<u8>, Arc<Record>, RandomState> {
         &self.hash_table
     }
 

@@ -1,3 +1,4 @@
+use ahash::RandomState;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use scc::HashMap;
@@ -35,8 +36,8 @@ pub mod ttl;
 ///
 /// All methods are thread-safe and can be called concurrently from multiple threads.
 pub struct FeoxStore {
-    // Main hash table with fine-grained locking
-    pub(super) hash_table: HashMap<Vec<u8>, Arc<Record>>,
+    // Main hash table with fine-grained locking using AHash
+    pub(super) hash_table: HashMap<Vec<u8>, Arc<Record>, RandomState>,
 
     // Lock-free skip list for ordered access
     pub(super) tree: Arc<SkipMap<Vec<u8>, Arc<Record>>>,

@@ -280,7 +280,7 @@ fn sample_and_expire_batch(store: &Arc<FeoxStore>, config: &TtlConfig) -> (u64, 
 
 /// Get a random entry with TTL using sampling
 fn get_random_ttl_entry(
-    hash_table: &scc::HashMap<Vec<u8>, Arc<crate::core::record::Record>>,
+    hash_table: &scc::HashMap<Vec<u8>, Arc<crate::core::record::Record>, ahash::RandomState>,
     rng: &mut ThreadRng,
 ) -> Option<(Vec<u8>, Arc<crate::core::record::Record>)> {
     // Sample up to 100 entries and pick one with TTL
