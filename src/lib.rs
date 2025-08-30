@@ -22,8 +22,8 @@
 //!
 //! ## Features
 //!
-//! - **Ultra-Low Latency**: <200ns GET operations, <600ns INSERT operations
-//! - **Lock-Free Operations**: Uses DashMap and SkipList for concurrent access
+//! - **Ultra-Low Latency**: <200ns GET operations, <700ns INSERT operations
+//! - **Lock-Free Operations**: Uses SCC HashMap and SkipList for concurrent access
 //! - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 //! - **Flexible Storage**: Memory-only or persistent modes with async I/O
 //! - **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
@@ -280,17 +280,17 @@
 //!
 //! | Operation | Latency (Memory Mode) | Throughput |
 //! |-----------|----------------------|------------|
-//! | GET       | ~200-260ns | 2.1M ops/sec |
-//! | INSERT    | ~700ns | 850K ops/sec |
-//! | DELETE    | ~290ns | 1.1M ops/sec |
-//! | Mixed (80/20) | ~290ns | 3.1M ops/sec |
+//! | GET       | ~180-205ns | 11-14M ops/sec |
+//! | INSERT    | ~630-970ns | 1.0-1.8M ops/sec |
+//! | DELETE    | ~250ns | 4M ops/sec |
+//! | Mixed (80/20) | ~280ns | 3.8M ops/sec |
 //!
 //! ## Architecture Overview
 //!
 //! FeOxDB uses a lock-free, multi-tier architecture optimized for modern multi-core CPUs:
 //!
 //! ### Lock-Free Data Structures
-//! - **Hash Table**: DashMap provides lock-free concurrent hash map with sharded locks
+//! - **Hash Table**: SCC HashMap provides fine-grained locking optimized for high concurrency
 //! - **Ordered Index**: Crossbeam SkipList enables lock-free sorted traversal
 //! - **Atomic Operations**: All metadata updates use atomic primitives in hot path
 //!
@@ -301,7 +301,7 @@
 //! - **Write Coalescing**: Multiple updates to the same key are automatically coalesced
 //!
 //! ### Storage Tiers
-//! 1. **In-Memory Layer**: Hot data in DashMap with O(1) access
+//! 1. **In-Memory Layer**: Hot data in SCC HashMap with O(1) access
 //! 2. **Write Buffer**: Sharded buffers with thread-local affinity for write batching
 //! 3. **Persistent Storage**: Sector-aligned async I/O with write-ahead logging
 //! 4. **Cache Layer**: CLOCK algorithm keeps frequently accessed data in memory

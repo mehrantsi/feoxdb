@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,8 +13,8 @@ impl FeoxStore {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to insert (max 65KB)
-    /// * `value` - The value to store (max 4GB)
+    /// * `key` - The key to insert
+    /// * `value` - The value to store
     /// * `ttl_seconds` - Time-to-live in seconds
     ///
     /// # Returns
@@ -47,8 +48,8 @@ impl FeoxStore {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to insert (max 65KB)
-    /// * `value` - The value to store (max 4GB)
+    /// * `key` - The key to insert
+    /// * `value` - The value to store
     /// * `ttl_seconds` - Time-to-live in seconds
     /// * `timestamp` - Optional timestamp for conflict resolution. If `None`, uses current time.
     ///
@@ -78,6 +79,71 @@ impl FeoxStore {
         };
 
         self.insert_with_timestamp_and_ttl_internal(key, value, Some(timestamp), ttl_expiry)
+    }
+
+    /// Insert or update a key-value pair with TTL using zero-copy Bytes.
+    ///
+    /// This method avoids copying the value data by directly using the Bytes type,
+    /// which provides reference-counted zero-copy semantics.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert
+    /// * `value` - The value to store as Bytes
+    /// * `ttl_seconds` - Time-to-live in seconds
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # use bytes::Bytes;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// # let store = FeoxStore::builder().enable_ttl(true).build()?;
+    /// let data = Bytes::from_static(b"session_data");
+    /// // Key expires after 60 seconds
+    /// store.insert_bytes_with_ttl(b"session:123", data, 60)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// * Memory mode: ~800ns (avoids value copy)
+    /// * Persistent mode: ~1µs (buffered write, avoids value copy)
+    pub fn insert_bytes_with_ttl(&self, key: &[u8], value: Bytes, ttl_seconds: u64) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.insert_bytes_with_ttl_and_timestamp(key, value, ttl_seconds, None)
+    }
+
+    /// Insert or update a key-value pair with TTL and explicit timestamp using zero-copy Bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert
+    /// * `value` - The value to store as Bytes
+    /// * `ttl_seconds` - Time-to-live in seconds
+    /// * `timestamp` - Optional timestamp for conflict resolution. If `None`, uses current time.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful.
+    pub fn insert_bytes_with_ttl_and_timestamp(
+        &self,
+        key: &[u8],
+        value: Bytes,
+        ttl_seconds: u64,
+        timestamp: Option<u64>,
+    ) -> Result<()> {
+        if !self.enable_ttl {
+            return Err(FeoxError::TtlNotEnabled);
+        }
+        self.insert_bytes_with_timestamp_and_ttl_internal(key, value, timestamp, ttl_seconds)
     }
 
     /// Get the remaining TTL (Time-To-Live) for a key in seconds.
@@ -111,7 +177,10 @@ impl FeoxStore {
         }
         self.validate_key(key)?;
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
         let ttl_expiry = record.ttl_expiry.load(Ordering::Acquire);
 
         if ttl_expiry == 0 {
@@ -160,7 +229,10 @@ impl FeoxStore {
         }
         self.validate_key(key)?;
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
 
         let new_expiry = if ttl_seconds > 0 {
             self.get_timestamp() + (ttl_seconds * 1_000_000_000)

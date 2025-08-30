@@ -8,8 +8,8 @@
 
 ## Features
 
-- **Sub-Microsecond Latency**: <200ns GET, <600ns INSERT operations
-- **Lock-Free Concurrency**: Built on DashMap and Crossbeam SkipList
+- **Sub-Microsecond Latency**: <200ns GET, <700ns INSERT operations
+- **Lock-Free Concurrency**: Built on SCC HashMap and Crossbeam SkipList
 - **io_uring Support** (Linux): Kernel-bypass I/O for maximum throughput with minimal syscalls
 - **Flexible Storage**: Memory-only or persistent modes with async I/O
 - **JSON Patch Support**: RFC 6902 compliant partial updates for JSON values
@@ -397,17 +397,18 @@ Typical performance on M3 Max:
 
 | Operation | Latency | Throughput | Notes |
 |-----------|---------|------------|-------|
-| GET | ~200-260ns | 2.1M ops/sec | DashMap lookup + stats |
-| INSERT | ~700ns | 850K ops/sec | Memory allocation + indexing |
-| DELETE | ~290ns | 1.1M ops/sec | Removal from indexes |
-| Mixed (80/20 R/W) | ~290ns | 3.1M ops/sec | Real-world workload |
+| GET | ~180-205ns | 11-14M ops/sec | SCC HashMap lookup + stats |
+| INSERT | ~630-970ns | 1.0-1.8M ops/sec | Memory allocation + indexing |
+| DELETE | ~250ns | 4M ops/sec | Removal from indexes |
+| Mixed (80/20 R/W) | ~280ns | 3.8M ops/sec | Real-world workload |
 
 ### Throughput
 
-Based on Criterion benchmarks:
-- **GET**: 8.2M - 10.5M ops/sec (varies by batch size)
-- **INSERT**: 730K - 1.1M ops/sec (varies by value size)
-- **Mixed workload (80/20)**: 3.1M ops/sec
+Based on Criterion benchmarks with SCC HashMap:
+- **GET**: 11-14M ops/sec (varies by batch size)
+- **INSERT**: 1.0-1.8M ops/sec (varies by batch size)
+- **DELETE**: ~4M ops/sec
+- **Mixed workload (80/20)**: 3.8M ops/sec
 
 ## Architecture
 
@@ -417,7 +418,7 @@ FeOxDB uses a lock-free, multi-tier architecture optimized for modern multi-core
 
 The entire hot path is lock-free, ensuring consistent sub-microsecond latency:
 
-- **DashMap**: Sharded hash table with lock-free reads and fine-grained locking for writes
+- **SCC HashMap**: Fine-grained locking hash table optimized for highly concurrent workloads
 - **Crossbeam SkipList**: Fully lock-free ordered index for range queries
 - **Atomic Operations**: All metadata updates use atomic primitives
 - **RCU-style Access**: Read-Copy-Update pattern for zero-cost reads
@@ -449,7 +450,7 @@ Writes are decoupled from disk I/O for maximum throughput:
 ### Storage Tiers
 
 1. **In-Memory Layer**
-   - Primary storage in DashMap
+   - Primary storage in SCC HashMap
    - O(1) lookups with ~100ns latency
    - Automatic memory management
 

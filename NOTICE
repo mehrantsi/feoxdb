@@ -8,9 +8,9 @@ The FeOxDB Project (https://github.com/mehrantsi/feoxdb).
 
 This software includes the following third-party components:
 
-- DashMap: Licensed under MIT License
-  Copyright (c) 2019 Acrimon
-  https://github.com/xacrimon/dashmap
+- SCC (Scalable Concurrent Containers): Licensed under Apache-2.0
+  Copyright (c) 2023 wvwwvwwv
+  https://github.com/wvwwvwwv/scalable-concurrent-containers
 
 - SkipList: Licensed under MIT License
   Copyright (c) 2016 The Crossbeam Project

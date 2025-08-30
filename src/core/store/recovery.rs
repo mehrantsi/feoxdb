@@ -120,7 +120,7 @@ impl FeoxStore {
 
             let record_arc = Arc::new(record);
             let key_len = key.len();
-            self.hash_table.insert(key.clone(), Arc::clone(&record_arc));
+            self.hash_table.upsert(key.clone(), Arc::clone(&record_arc));
             self.tree.insert(key, Arc::clone(&record_arc));
 
             self.stats.record_count.fetch_add(1, Ordering::AcqRel);

@@ -124,6 +124,43 @@ impl Record {
         record
     }
 
+    /// Create a new record from a Bytes value (zero-copy)
+    pub fn new_from_bytes(key: Vec<u8>, value: Bytes, timestamp: u64) -> Self {
+        let key_len = key.len() as u16;
+        let value_len = value.len();
+
+        Self {
+            // Cache line 1 - GET hot path
+            key,
+            value: parking_lot::RwLock::new(Some(value)),
+
+            // Cache line 2 - TTL and metadata
+            ttl_expiry: AtomicU64::new(0),
+            timestamp,
+            value_len,
+            sector: AtomicU64::new(0),
+            refcount: AtomicU32::new(1),
+            key_len,
+
+            // Cache line 3 - cold fields
+            hash_link: AtomicLink::new(),
+            cache_ref_bit: AtomicU32::new(0),
+            cache_access_time: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a new record from Bytes with TTL
+    pub fn new_from_bytes_with_ttl(
+        key: Vec<u8>,
+        value: Bytes,
+        timestamp: u64,
+        ttl_expiry: u64,
+    ) -> Self {
+        let record = Self::new_from_bytes(key, value, timestamp);
+        record.ttl_expiry.store(ttl_expiry, Ordering::Release);
+        record
+    }
+
     pub fn calculate_size(&self) -> usize {
         mem::size_of::<Self>() + self.key.capacity() + self.value_len
     }

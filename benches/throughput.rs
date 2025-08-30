@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use feoxdb::FeoxStore;
 use rand::Rng;
@@ -7,6 +8,7 @@ fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert");
 
     for size in &[1000, 10000, 100000, 1000000] {
+        // Regular insert benchmark
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             b.iter_batched_ref(
@@ -26,6 +28,33 @@ fn bench_insert(c: &mut Criterion) {
                 criterion::BatchSize::SmallInput,
             );
         });
+
+        // insert_bytes benchmark (zero-copy)
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("insert_bytes_{}", size)),
+            size,
+            |b, &size| {
+                b.iter_batched_ref(
+                    || {
+                        let store = FeoxStore::new(None).unwrap();
+                        let keys: Vec<Vec<u8>> = (0..size)
+                            .map(|i| format!("key_{:08}", i).into_bytes())
+                            .collect();
+                        let values: Vec<Bytes> =
+                            (0..size).map(|_| Bytes::from(vec![0u8; 100])).collect();
+                        (store, keys, values)
+                    },
+                    |(store, keys, values)| {
+                        for (key, value) in keys.iter().zip(values.iter()) {
+                            store
+                                .insert_bytes(black_box(key), black_box(value.clone()))
+                                .unwrap();
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }

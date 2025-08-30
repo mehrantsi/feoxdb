@@ -4,6 +4,11 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Benchmark"]
+    types:
+      - completed
+    branches: [ main, master ]
 
 permissions:
   contents: read
@@ -17,6 +22,8 @@ concurrency:
 jobs:
   build:
     runs-on: self-hosted
+    # Only run if triggered manually, by push, or if benchmark workflow succeeded
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
       

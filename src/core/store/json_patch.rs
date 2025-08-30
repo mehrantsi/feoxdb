@@ -76,7 +76,10 @@ impl FeoxStore {
 
         // Get the value and release the lock immediately
         let current_value = {
-            let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+            let record = self
+                .hash_table
+                .read(key, |_, v| v.clone())
+                .ok_or(FeoxError::KeyNotFound)?;
 
             if timestamp < record.timestamp {
                 return Err(FeoxError::OlderTimestamp);
