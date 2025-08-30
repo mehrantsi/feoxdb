@@ -206,23 +206,13 @@ impl FeoxStore {
         self.stats
             .record_insert(start.elapsed().as_nanos() as u64, is_update);
 
-        // Only do persistence and cache checks if not in memory-only mode
+        // Only do persistence if not in memory-only mode
         if !self.memory_only {
             // Queue for persistence if write buffer exists
             if let Some(ref wb) = self.write_buffer {
                 if let Err(_e) = wb.add_write(Operation::Insert, record, 0) {
                     // Don't fail the insert - data is still in memory
                     // Return code already indicates success since data is in memory
-                }
-            }
-
-            // Check memory pressure and trigger cache eviction if needed
-            if self.enable_caching {
-                if let Some(ref cache) = self.cache {
-                    let stats = cache.stats();
-                    if stats.memory_usage > stats.high_watermark {
-                        cache.evict_entries();
-                    }
                 }
             }
         }
@@ -312,22 +302,12 @@ impl FeoxStore {
         self.stats
             .record_insert(start.elapsed().as_nanos() as u64, false);
 
-        // Only do persistence and cache checks if not in memory-only mode
+        // Only do persistence if not in memory-only mode
         if !self.memory_only {
             // Queue for persistence if write buffer exists
             if let Some(ref wb) = self.write_buffer {
                 if let Err(_e) = wb.add_write(Operation::Insert, record, 0) {
                     // Don't fail the insert - data is still in memory
-                }
-            }
-
-            // Check memory pressure and trigger cache eviction if needed
-            if self.enable_caching {
-                if let Some(ref cache) = self.cache {
-                    let stats = cache.stats();
-                    if stats.memory_usage > stats.high_watermark {
-                        cache.evict_entries();
-                    }
                 }
             }
         }
