@@ -1,6 +1,6 @@
 use crossbeam_skiplist::SkipMap;
-use dashmap::DashMap;
 use parking_lot::RwLock;
+use scc::HashMap;
 use std::sync::Arc;
 
 use crate::core::record::Record;
@@ -35,8 +35,8 @@ pub mod ttl;
 ///
 /// All methods are thread-safe and can be called concurrently from multiple threads.
 pub struct FeoxStore {
-    // Main hash table with lock-free operations
-    pub(super) hash_table: DashMap<Vec<u8>, Arc<Record>>,
+    // Main hash table with fine-grained locking
+    pub(super) hash_table: HashMap<Vec<u8>, Arc<Record>>,
 
     // Lock-free skip list for ordered access
     pub(super) tree: Arc<SkipMap<Vec<u8>, Arc<Record>>>,
@@ -98,7 +98,7 @@ impl FeoxStore {
 
     /// Check if a key exists
     pub fn contains_key(&self, key: &[u8]) -> bool {
-        self.hash_table.contains_key(key)
+        self.hash_table.contains(key)
     }
 
     /// Get the number of records in the store

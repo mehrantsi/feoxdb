@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use scc::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -36,16 +36,17 @@ impl FeoxStore {
         let old_size = old_record.calculate_size();
         let new_size = self.calculate_record_size(old_record.key.len(), value.len());
 
-        let old_record_arc = if let Some(entry) = self.hash_table.get(&old_record.key) {
-            Arc::clone(&*entry)
-        } else {
-            return Err(FeoxError::KeyNotFound);
-        };
+        let old_record_arc =
+            if let Some(entry) = self.hash_table.read(&old_record.key, |_, v| v.clone()) {
+                entry
+            } else {
+                return Err(FeoxError::KeyNotFound);
+            };
 
         let key_vec = new_record.key.clone();
 
         self.hash_table
-            .insert(key_vec.clone(), Arc::clone(&new_record));
+            .upsert(key_vec.clone(), Arc::clone(&new_record));
         self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
 
         if new_size > old_size {
@@ -85,7 +86,7 @@ impl FeoxStore {
     }
 
     /// Get access to hash table (for TTL cleaner)
-    pub(crate) fn get_hash_table(&self) -> &DashMap<Vec<u8>, Arc<Record>> {
+    pub(crate) fn get_hash_table(&self) -> &HashMap<Vec<u8>, Arc<Record>> {
         &self.hash_table
     }
 

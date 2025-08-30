@@ -136,9 +136,8 @@ impl FeoxStore {
 
         let key_vec = key.to_vec();
 
-        // Use DashMap's entry API for atomic operations
         let result = match self.hash_table.entry(key_vec.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            scc::hash_map::Entry::Occupied(mut entry) => {
                 let old_record = entry.get();
 
                 // Get timestamp inside the critical section to ensure it's always newer
@@ -235,7 +234,7 @@ impl FeoxStore {
 
                 Ok(new_val)
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            scc::hash_map::Entry::Vacant(entry) => {
                 // Key doesn't exist, create it with initial value
                 // Get timestamp inside the critical section
                 let timestamp = match timestamp {
@@ -259,7 +258,7 @@ impl FeoxStore {
                     Arc::new(Record::new(key_vec.clone(), value, timestamp))
                 };
 
-                entry.insert(Arc::clone(&new_record));
+                let _ = entry.insert_entry(Arc::clone(&new_record));
 
                 // Update skip list
                 self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
@@ -414,21 +413,19 @@ impl FeoxStore {
 
         // Phase 1: Check value and save record reference for version tracking
         let initial_record = {
-            let entry = match self.hash_table.get(&key_vec) {
+            let entry = match self.hash_table.read(&key_vec, |_, v| v.clone()) {
                 Some(e) => e,
                 None => return Ok(false), // Key doesn't exist
             };
 
-            let record = entry.value();
-            let record_arc = Arc::clone(record);
+            let record_arc = entry;
 
             // Check if value matches expected
-            let value_matches = if let Some(val) = record.get_value() {
+            let value_matches = if let Some(val) = record_arc.get_value() {
                 // Fast path: value in memory
                 val.as_ref() == expected
             } else {
                 // Need disk I/O
-                drop(entry); // Release read lock before disk I/O
 
                 let disk_value = self.load_value_from_disk(&record_arc)?;
                 disk_value == expected
@@ -446,7 +443,7 @@ impl FeoxStore {
 
         // Phase 2: Acquire write lock and verify record hasn't changed
         match self.hash_table.entry(key_vec.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            scc::hash_map::Entry::Occupied(mut entry) => {
                 let old_record = entry.get();
 
                 // Check if the record is still the same one we read earlier
@@ -488,7 +485,6 @@ impl FeoxStore {
                 };
 
                 entry.insert(Arc::clone(&new_record));
-                drop(entry); // Release lock
 
                 self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
 
@@ -520,7 +516,7 @@ impl FeoxStore {
 
                 Ok(true)
             }
-            dashmap::mapref::entry::Entry::Vacant(_) => Ok(false),
+            scc::hash_map::Entry::Vacant(_) => Ok(false),
         }
     }
 }

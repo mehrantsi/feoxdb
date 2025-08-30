@@ -111,7 +111,10 @@ impl FeoxStore {
         }
         self.validate_key(key)?;
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
         let ttl_expiry = record.ttl_expiry.load(Ordering::Acquire);
 
         if ttl_expiry == 0 {
@@ -160,7 +163,10 @@ impl FeoxStore {
         }
         self.validate_key(key)?;
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
 
         let new_expiry = if ttl_seconds > 0 {
             self.get_timestamp() + (ttl_seconds * 1_000_000_000)

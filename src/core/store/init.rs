@@ -1,6 +1,6 @@
 use crossbeam_skiplist::SkipMap;
-use dashmap::DashMap;
 use parking_lot::RwLock;
+use scc::HashMap;
 use std::sync::Arc;
 
 use crate::constants::*;
@@ -26,7 +26,7 @@ impl FeoxStore {
             enable_ttl: false,
             ttl_config: None,
         };
-        let hash_table = DashMap::with_capacity(1 << config.hash_bits);
+        let hash_table = HashMap::with_capacity(1 << config.hash_bits);
 
         let free_space = Arc::new(RwLock::new(FreeSpaceManager::new()));
         let metadata = Arc::new(RwLock::new(Metadata::new()));
@@ -79,7 +79,7 @@ impl FeoxStore {
     /// Create a new FeoxStore with custom configuration
     pub fn with_config(config: StoreConfig) -> Result<Self> {
         // Initialize hash table with configured capacity
-        let hash_table = DashMap::with_capacity(1 << config.hash_bits);
+        let hash_table = HashMap::with_capacity(1 << config.hash_bits);
 
         let free_space = Arc::new(RwLock::new(FreeSpaceManager::new()));
         let metadata = Arc::new(RwLock::new(Metadata::new()));

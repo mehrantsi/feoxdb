@@ -89,11 +89,11 @@ impl FeoxStore {
         self.validate_key_value(key, value)?;
 
         // Check for existing record
-        let is_update = self.hash_table.contains_key(key);
-        if let Some(existing_record) = self.hash_table.get(key) {
+        let is_update = self.hash_table.contains(key);
+        let existing_record = self.hash_table.read(key, |_, v| v.clone());
+        if let Some(existing_record) = existing_record {
             let existing_ts = existing_record.timestamp;
-            let existing_clone = Arc::clone(&existing_record);
-            drop(existing_record); // Release the reference before updating
+            let existing_clone = existing_record;
 
             if timestamp < existing_ts {
                 return Err(FeoxError::OlderTimestamp);
@@ -123,8 +123,8 @@ impl FeoxStore {
 
         let key_vec = record.key.clone();
 
-        // Insert into hash table - DashMap handles locking internally
-        self.hash_table.insert(key_vec.clone(), Arc::clone(&record));
+        // Insert into hash table
+        self.hash_table.upsert(key_vec.clone(), Arc::clone(&record));
 
         // Insert into lock-free skip list for ordered access
         self.tree.insert(key_vec, Arc::clone(&record));
@@ -212,7 +212,10 @@ impl FeoxStore {
             }
         }
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
 
         // Check TTL expiry if TTL is enabled
         if self.enable_ttl {
@@ -295,7 +298,10 @@ impl FeoxStore {
             }
         }
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
 
         // Check TTL expiry if TTL is enabled
         if self.enable_ttl {
@@ -387,11 +393,12 @@ impl FeoxStore {
         self.validate_key(key)?;
 
         // Remove from hash table and get the record
-        let (_key, record) = self.hash_table.remove(key).ok_or(FeoxError::KeyNotFound)?;
+        let record_pair = self.hash_table.remove(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = record_pair.1;
 
         if timestamp < record.timestamp {
             // Put it back if timestamp is older
-            self.hash_table.insert(key.to_vec(), record);
+            self.hash_table.upsert(key.to_vec(), record);
             return Err(FeoxError::OlderTimestamp);
         }
 
@@ -463,7 +470,10 @@ impl FeoxStore {
     pub fn get_size(&self, key: &[u8]) -> Result<usize> {
         self.validate_key(key)?;
 
-        let record = self.hash_table.get(key).ok_or(FeoxError::KeyNotFound)?;
+        let record = self
+            .hash_table
+            .read(key, |_, v| v.clone())
+            .ok_or(FeoxError::KeyNotFound)?;
 
         Ok(record.value_len)
     }
