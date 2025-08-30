@@ -1,5 +1,6 @@
 use crate::core::store::FeoxStore;
 use crate::error::FeoxError;
+use bytes::Bytes;
 use std::thread;
 use std::time::Duration;
 
@@ -195,4 +196,92 @@ fn test_ttl_with_builder_explicit_disable() {
         store.insert_with_ttl(b"key1", b"value1", 10),
         Err(FeoxError::TtlNotEnabled)
     ));
+}
+
+#[test]
+fn test_insert_bytes_with_ttl() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+
+    // Insert with 1 second TTL using Bytes
+    let value = Bytes::from_static(b"value1");
+    store.insert_bytes_with_ttl(b"key1", value, 1).unwrap();
+
+    // Should be retrievable immediately
+    let retrieved = store.get_bytes(b"key1").unwrap();
+    assert_eq!(&retrieved[..], b"value1");
+
+    // Wait for expiry
+    thread::sleep(Duration::from_millis(1100));
+
+    // Should be expired now
+    let result = store.get(b"key1");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_insert_bytes_with_ttl_and_timestamp() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+
+    // Get a base timestamp
+    let base_timestamp = store.get_timestamp_pub();
+
+    // Insert with TTL and explicit timestamp
+    let value1 = Bytes::from(vec![1, 2, 3, 4]);
+    store
+        .insert_bytes_with_ttl_and_timestamp(b"key1", value1, 10, Some(base_timestamp))
+        .unwrap();
+
+    // Try to update with older timestamp - should fail
+    let value2 = Bytes::from(vec![5, 6, 7, 8]);
+    let result = store.insert_bytes_with_ttl_and_timestamp(
+        b"key1",
+        value2.clone(),
+        10,
+        Some(base_timestamp - 1000),
+    );
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), FeoxError::OlderTimestamp));
+
+    // Update with newer timestamp - should succeed
+    store
+        .insert_bytes_with_ttl_and_timestamp(b"key1", value2, 10, Some(base_timestamp + 1000))
+        .unwrap();
+
+    let retrieved = store.get(b"key1").unwrap();
+    assert_eq!(retrieved.as_slice(), &[5, 6, 7, 8]);
+}
+
+#[test]
+fn test_insert_bytes_ttl_not_enabled() {
+    // Create store without TTL enabled
+    let store = FeoxStore::builder().enable_ttl(false).build().unwrap();
+
+    let value = Bytes::from_static(b"value1");
+    let result = store.insert_bytes_with_ttl(b"key1", value, 10);
+
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), FeoxError::TtlNotEnabled));
+}
+
+#[test]
+fn test_insert_bytes_preserves_ttl() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+
+    // Insert with TTL
+    let value1 = Bytes::from_static(b"value1");
+    store.insert_bytes_with_ttl(b"key1", value1, 10).unwrap();
+
+    // Check TTL is set
+    let ttl = store.get_ttl(b"key1").unwrap();
+    assert!(ttl.is_some());
+    let ttl_seconds = ttl.unwrap();
+    assert!(ttl_seconds > 8 && ttl_seconds <= 10);
+
+    // Update with regular insert_bytes (should remove TTL)
+    let value2 = Bytes::from_static(b"value2");
+    store.insert_bytes(b"key1", value2).unwrap();
+
+    // TTL should be removed
+    let ttl = store.get_ttl(b"key1").unwrap();
+    assert!(ttl.is_none());
 }

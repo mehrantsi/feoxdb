@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use feoxdb::error::Result;
 use feoxdb::FeoxStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -344,10 +345,10 @@ fn main() -> Result<()> {
     let phase_start = Instant::now();
     for i in 0..num_keys {
         let key = generate_key(i);
-        let value = generate_value(value_size);
+        let value = Bytes::from(generate_value(value_size));
 
         let op_start = Instant::now();
-        let success = store.insert(&key, &value).is_ok();
+        let success = store.insert_bytes(&key, value).is_ok();
         let latency_ns = op_start.elapsed().as_nanos() as u64;
 
         insert_stats.record(latency_ns, success);

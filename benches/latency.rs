@@ -118,6 +118,7 @@ fn benchmark_insert_latency(c: &mut Criterion) {
 
     // Only test memory mode as persistent benchmarks are misleading
     for value_size in [64, 1024, 4096].iter() {
+        // Regular insert benchmark
         let test_name = format!("size_{}", value_size);
         group.bench_with_input(
             BenchmarkId::from_parameter(test_name),
@@ -130,6 +131,25 @@ fn benchmark_insert_latency(c: &mut Criterion) {
                 b.iter(|| {
                     let key = format!("key_{:012}", i);
                     black_box(store.insert(key.as_bytes(), &value).ok());
+                    i += 1;
+                });
+            },
+        );
+
+        // insert_bytes benchmark (zero-copy)
+        let test_name = format!("insert_bytes_size_{}", value_size);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(test_name),
+            value_size,
+            |b, &value_size| {
+                use bytes::Bytes;
+                let store = Arc::new(FeoxStore::new(None).unwrap());
+                let value = Bytes::from(vec![0u8; value_size]);
+                let mut i = 0u64;
+
+                b.iter(|| {
+                    let key = format!("key_{:012}", i);
+                    black_box(store.insert_bytes(key.as_bytes(), value.clone()).ok());
                     i += 1;
                 });
             },
