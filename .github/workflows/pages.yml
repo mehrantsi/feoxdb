@@ -249,9 +249,9 @@ jobs:
               
               <h2>Individual Latency Reports</h2>
               <ul>
-                  <li><a href="benchmarks/get_latency/sequential/report/index.html">Get - Sequential Access</a></li>
-                  <li><a href="benchmarks/get_latency/random/report/index.html">Get - Random Access</a></li>
-                  <li><a href="benchmarks/get_latency/hot_key/report/index.html">Get - Hot Key Access</a></li>
+                  <li><a href="benchmarks/get_latency/get_sequential/report/index.html">Get - Sequential Access</a></li>
+                  <li><a href="benchmarks/get_latency/get_random/report/index.html">Get - Random Access</a></li>
+                  <li><a href="benchmarks/get_latency/get_hot_key/report/index.html">Get - Hot Key Access</a></li>
                   <li><a href="benchmarks/insert_latency/size_64/report/index.html">Insert - 64 byte values</a></li>
                   <li><a href="benchmarks/insert_latency/size_1024/report/index.html">Insert - 1KB values</a></li>
                   <li><a href="benchmarks/insert_latency/size_4096/report/index.html">Insert - 4KB values</a></li>
