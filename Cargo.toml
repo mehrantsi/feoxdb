@@ -1,6 +1,6 @@
 [package]
 name = "feoxdb"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Mehran Toosi <dev@mehran.dk>"]
 description = "Iron-oxide fast embedded database - nanosecond-level key-value storage"
@@ -13,6 +13,9 @@ categories = ["database", "data-structures", "filesystem", "caching"]
 license = "Apache-2.0"
 
 [dependencies]
+# Memory allocator (optional)
+tikv-jemallocator = { version = "0.6", optional = true }
+
 # Synchronization
 once_cell = "1.19"
 
@@ -69,7 +72,9 @@ strip = true
 inherits = "release"
 
 [features]
-default = []
+default = ["jemalloc"]
+jemalloc = ["tikv-jemallocator"]
+system-alloc = []
 io_uring = []
 persistent = []
 

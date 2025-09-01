@@ -469,6 +469,28 @@ Writes are decoupled from disk I/O for maximum throughput:
    - Keeps hot data in memory after disk write
    - Transparent cache management
 
+## Build Configuration
+
+### Memory Allocator
+
+FeOxDB uses [jemalloc](http://jemalloc.net/) by default for better performance, especially in multi-threaded workloads.
+
+To opt-out of jemalloc and use the system allocator instead:
+
+```bash
+# Build with system allocator
+cargo build --no-default-features --features system-alloc
+
+# Install with system allocator
+cargo install feoxdb --no-default-features --features system-alloc
+```
+
+Use the system allocator when:
+- Building for embedded systems with tight memory constraints
+- Debugging with memory profiling tools (valgrind, AddressSanitizer)
+- Targeting platforms where jemalloc doesn't compile (some musl targets)
+- You need the smallest possible binary size (saves ~200-300KB)
+
 ## API Documentation
 
 Full API documentation is available:
