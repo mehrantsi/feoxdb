@@ -6,6 +6,8 @@
 
 [📚 Documentation](https://feoxdb.com) | [📊 Benchmarks](https://feoxdb.com/benchmarks.html) | [💬 Issues](https://github.com/mehrantsi/FeOxDB/issues)
 
+> **Looking for a Redis-compatible server?** Check out [feox-server](https://github.com/mehrantsi/feox-server) - a Redis protocol-compatible server built on Feox DB.
+
 ## Features
 
 - **Sub-Microsecond Latency**: <200ns GET, <700ns INSERT operations
