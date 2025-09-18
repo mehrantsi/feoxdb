@@ -37,7 +37,7 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~800ns
     /// * Persistent mode: ~1µs (buffered write)
-    pub fn insert_with_ttl(&self, key: &[u8], value: &[u8], ttl_seconds: u64) -> Result<()> {
+    pub fn insert_with_ttl(&self, key: &[u8], value: &[u8], ttl_seconds: u64) -> Result<bool> {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
@@ -62,7 +62,7 @@ impl FeoxStore {
         value: &[u8],
         ttl_seconds: u64,
         timestamp: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
@@ -114,7 +114,12 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~800ns (avoids value copy)
     /// * Persistent mode: ~1µs (buffered write, avoids value copy)
-    pub fn insert_bytes_with_ttl(&self, key: &[u8], value: Bytes, ttl_seconds: u64) -> Result<()> {
+    pub fn insert_bytes_with_ttl(
+        &self,
+        key: &[u8],
+        value: Bytes,
+        ttl_seconds: u64,
+    ) -> Result<bool> {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
@@ -139,7 +144,7 @@ impl FeoxStore {
         value: Bytes,
         ttl_seconds: u64,
         timestamp: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
