@@ -23,7 +23,7 @@ impl FeoxStore {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if successful.
+    /// Returns `Ok(true)` if a new key was inserted, `Ok(false)` if an existing key was updated.
     ///
     /// # Errors
     ///
@@ -47,7 +47,7 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~600ns
     /// * Persistent mode: ~800ns (buffered write)
-    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<bool> {
         self.insert_with_timestamp(key, value, None)
     }
 
@@ -70,7 +70,7 @@ impl FeoxStore {
         key: &[u8],
         value: &[u8],
         timestamp: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.insert_with_timestamp_and_ttl_internal(key, value, timestamp, 0)
     }
 
@@ -90,7 +90,7 @@ impl FeoxStore {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if successful.
+    /// Returns `Ok(true)` if a new key was inserted, `Ok(false)` if an existing key was updated.
     ///
     /// # Errors
     ///
@@ -116,7 +116,7 @@ impl FeoxStore {
     ///
     /// * Memory mode: ~600ns (avoids value copy)
     /// * Persistent mode: ~800ns (buffered write, avoids value copy)
-    pub fn insert_bytes(&self, key: &[u8], value: Bytes) -> Result<()> {
+    pub fn insert_bytes(&self, key: &[u8], value: Bytes) -> Result<bool> {
         self.insert_bytes_with_timestamp(key, value, None)
     }
 
@@ -139,7 +139,7 @@ impl FeoxStore {
         key: &[u8],
         value: Bytes,
         timestamp: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.insert_bytes_with_timestamp_and_ttl_internal(key, value, timestamp, 0)
     }
 
@@ -149,7 +149,7 @@ impl FeoxStore {
         value: &[u8],
         timestamp: Option<u64>,
         ttl_expiry: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let start = std::time::Instant::now();
         let timestamp = match timestamp {
             Some(0) | None => self.get_timestamp(),
@@ -217,7 +217,7 @@ impl FeoxStore {
             }
         }
 
-        Ok(())
+        Ok(!is_update)
     }
 
     /// Internal method to insert a Bytes value with timestamp and TTL (zero-copy)
@@ -227,7 +227,7 @@ impl FeoxStore {
         value: Bytes,
         timestamp: Option<u64>,
         ttl_seconds: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let start = std::time::Instant::now();
         // Get timestamp before any operations
         let timestamp = match timestamp {
@@ -242,6 +242,7 @@ impl FeoxStore {
         }
 
         // Check for existing record
+        let is_update = self.hash_table.contains(key);
         let existing_record = self.hash_table.read(key, |_, v| v.clone());
         if let Some(existing_record) = existing_record {
             let existing_ts = existing_record.timestamp;
@@ -300,7 +301,7 @@ impl FeoxStore {
             .memory_usage
             .fetch_add(new_size, Ordering::AcqRel);
         self.stats
-            .record_insert(start.elapsed().as_nanos() as u64, false);
+            .record_insert(start.elapsed().as_nanos() as u64, is_update);
 
         // Only do persistence if not in memory-only mode
         if !self.memory_only {
@@ -312,7 +313,7 @@ impl FeoxStore {
             }
         }
 
-        Ok(())
+        Ok(!is_update)
     }
 
     /// Retrieve a value by key.

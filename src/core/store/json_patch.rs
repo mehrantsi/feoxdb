@@ -95,6 +95,7 @@ impl FeoxStore {
         let new_value = crate::utils::json_patch::apply_json_patch(&current_value, patch)?;
 
         // Now update without holding any references
-        self.insert_with_timestamp(key, &new_value, Some(timestamp))
+        self.insert_with_timestamp(key, &new_value, Some(timestamp))?;
+        Ok(())
     }
 }

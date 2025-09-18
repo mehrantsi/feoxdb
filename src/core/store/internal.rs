@@ -18,7 +18,7 @@ impl FeoxStore {
         value: &[u8],
         timestamp: u64,
         ttl_expiry: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let new_record = if ttl_expiry > 0 && self.enable_ttl {
             Arc::new(Record::new_with_timestamp_ttl(
                 old_record.key.clone(),
@@ -84,7 +84,7 @@ impl FeoxStore {
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Update an existing record with a new value (Bytes version for zero-copy).
@@ -94,7 +94,7 @@ impl FeoxStore {
         value: Bytes,
         timestamp: u64,
         ttl_expiry: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let new_record = if ttl_expiry > 0 && self.enable_ttl {
             Arc::new(Record::new_from_bytes_with_ttl(
                 old_record.key.clone(),
@@ -160,7 +160,7 @@ impl FeoxStore {
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Get access to hash table (for TTL cleaner)
