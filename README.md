@@ -4,9 +4,9 @@
   Ultra-fast, embedded key-value database for Rust with sub-microsecond latency.
 </div>
 
-[📚 Documentation](https://feoxdb.com) | [📊 Benchmarks](https://feoxdb.com/benchmarks.html) | [💬 Issues](https://github.com/mehrantsi/FeOxDB/issues)
+[Documentation](https://feoxdb.com) | [Benchmarks](https://feoxdb.com/benchmarks.html) | [Issues](https://github.com/mehrantsi/FeOxDB/issues)
 
-> **Looking for a Redis-compatible server?** Check out [feox-server](https://github.com/mehrantsi/feox-server) - a Redis protocol-compatible server built on Feox DB.
+**Looking for a Redis-compatible server?** Check out [feox-server](https://github.com/mehrantsi/feox-server) - a Redis protocol-compatible server built on Feox DB.
 
 ## Features
 
