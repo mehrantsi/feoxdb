@@ -502,7 +502,6 @@ impl FeoxStore {
             }
         }
 
-        // read from disk
         let mut keys = Vec::with_capacity(self.hash_table.len());
         self.hash_table.scan(|k, _| {
             keys.push(k.to_owned());
