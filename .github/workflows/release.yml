@@ -14,10 +14,10 @@ permissions:
 jobs:
   create-release:
     name: Create GitHub Release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -28,22 +28,18 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: create-release
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Verify package
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo package --verbose
-      
+        run: cargo package --verbose
+
       - name: Publish to crates.io
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

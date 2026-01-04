@@ -15,15 +15,15 @@ env:
 jobs:
   pre-publish-checks:
     name: Pre-publish Checks
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      # - name: Install Rust stable
-      #   uses: dtolnay/rust-toolchain@stable
-      #   with:
-      #     components: rustfmt, clippy
-      
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
       - name: Check version in Cargo.toml
         run: |
           VERSION=$(grep "^version" Cargo.toml | sed 's/.*"\(.*\)"/\1/')
@@ -32,53 +32,42 @@ jobs:
             exit 1
           fi
           echo "Version check passed: $VERSION"
-      
+
       - name: Check formatting
         run: cargo fmt -- --check
-      
+
       - name: Run clippy
         run: cargo clippy --all-features -- -D warnings
-      
+
       - name: Run tests
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --all-features
-      
+        run: cargo test --all-features
+
       - name: Build documentation
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo doc --no-deps --all-features
-      
+        run: cargo doc --no-deps --all-features
+
       - name: Package verification
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo package --verbose
           cargo package --list
 
   publish:
     name: Publish to crates.io
     needs: pre-publish-checks
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Login to crates.io
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      
+        run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
       - name: Publish to crates.io (dry run)
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo publish --dry-run
-      
+        run: cargo publish --dry-run
+
       - name: Publish to crates.io
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo publish
+        run: cargo publish
       
       - name: Create git tag
         run: |
