@@ -436,7 +436,7 @@ impl FeoxStore {
     ///
     /// Significantly faster than `get()` for large values:
     /// * 100 bytes: ~15% faster
-    /// * 1KB: ~50% faster  
+    /// * 1KB: ~50% faster
     /// * 10KB: ~90% faster
     /// * 100KB: ~95% faster
     pub fn get_bytes(&self, key: &[u8]) -> Result<Bytes> {
@@ -488,6 +488,53 @@ impl FeoxStore {
         self.stats
             .record_get(start.elapsed().as_nanos() as u64, cache_hit);
         Ok(value)
+    }
+
+    /// Get all keys in the store.
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        let start = std::time::Instant::now();
+
+        if self.enable_caching {
+            if let Some(ref cache) = self.cache {
+                self.stats
+                    .record_keys(start.elapsed().as_nanos() as u64, true);
+                return cache.keys();
+            }
+        }
+
+        let mut keys = Vec::with_capacity(self.hash_table.len());
+        self.hash_table.scan(|k, _| {
+            keys.push(k.to_owned());
+        });
+
+        self.stats
+            .record_keys(start.elapsed().as_nanos() as u64, false);
+        keys
+    }
+
+    /// Get all values in the store.
+    pub fn values(&self) -> Vec<Vec<u8>> {
+        let start = std::time::Instant::now();
+
+        if self.enable_caching {
+            if let Some(ref cache) = self.cache {
+                self.stats
+                    .record_values(start.elapsed().as_nanos() as u64, true);
+                return cache.values();
+            }
+        }
+
+        let mut values = Vec::with_capacity(self.hash_table.len());
+        self.hash_table.scan(|_, v| {
+            let v = v.get_value();
+            if let Some(value) = v {
+                values.push(value.to_vec());
+            }
+        });
+
+        self.stats
+            .record_values(start.elapsed().as_nanos() as u64, false);
+        values
     }
 
     /// Delete a key-value pair.

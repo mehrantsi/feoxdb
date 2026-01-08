@@ -78,6 +78,30 @@ impl ClockCache {
         None
     }
 
+    /// Get all keys from cache
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        for bucket in self.buckets.iter() {
+            let bucket = bucket.read();
+            for entry in bucket.iter() {
+                keys.push(entry.key.clone());
+            }
+        }
+        keys
+    }
+
+    /// Get all values from cache
+    pub fn values(&self) -> Vec<Vec<u8>> {
+        let mut values = Vec::new();
+        for bucket in self.buckets.iter() {
+            let bucket = bucket.read();
+            for entry in bucket.iter() {
+                values.push(entry.value.to_vec());
+            }
+        }
+        values
+    }
+
     /// Insert value into cache, triggering eviction if needed
     pub fn insert(&self, key: Vec<u8>, value: Bytes) {
         let size = key.len() + value.len() + std::mem::size_of::<CacheEntry>();
