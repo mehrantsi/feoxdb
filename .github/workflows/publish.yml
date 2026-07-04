@@ -12,12 +12,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   pre-publish-checks:
     name: Pre-publish Checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -55,47 +58,74 @@ jobs:
     needs: pre-publish-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check crates.io version
+        id: crate
+        run: |
+          STATUS=$(curl --write-out "%{http_code}" --silent --output /dev/null \
+            --header "User-Agent: feoxdb-publish-workflow" \
+            "https://crates.io/api/v1/crates/feoxdb/${{ inputs.version }}")
+          if [ "$STATUS" = "200" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "feoxdb ${{ inputs.version }} is already published"
+          elif [ "$STATUS" = "404" ]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "feoxdb ${{ inputs.version }} is not published yet"
+          else
+            echo "Unexpected crates.io response: $STATUS"
+            exit 1
+          fi
+
       - name: Login to crates.io
+        if: steps.crate.outputs.published == 'false'
         run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish to crates.io (dry run)
+        if: steps.crate.outputs.published == 'false'
         run: cargo publish --dry-run
 
       - name: Publish to crates.io
+        if: steps.crate.outputs.published == 'false'
         run: cargo publish
       
       - name: Create git tag
         run: |
+          TAG="v${{ inputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            exit 0
+          fi
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag -a v${{ inputs.version }} -m "Release version ${{ inputs.version }}"
-          git push origin v${{ inputs.version }}
+          git tag -a "$TAG" -m "Release version ${{ inputs.version }}"
+          git push origin "$TAG"
       
       - name: Create GitHub Release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ inputs.version }}
-          release_name: Release v${{ inputs.version }}
-          body: |
-            ## FeOxDB v${{ inputs.version }}
-            
-            Published to [crates.io](https://crates.io/crates/feoxdb/${{ inputs.version }})
-            
-            ### Installation
-            ```toml
-            [dependencies]
-            feoxdb = "${{ inputs.version }}"
-            ```
-            
-            ### Documentation
-            - [API Docs](https://docs.rs/feoxdb/${{ inputs.version }})
-            - [Repository](https://github.com/mehrantsi/feoxdb)
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            exit 0
+          fi
+
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --notes '## FeOxDB v${{ inputs.version }}
+
+          Published to [crates.io](https://crates.io/crates/feoxdb/${{ inputs.version }})
+
+          ### Installation
+          ```toml
+          [dependencies]
+          feoxdb = "${{ inputs.version }}"
+          ```
+
+          ### Documentation
+          - [API Docs](https://docs.rs/feoxdb/${{ inputs.version }})
+          - [Repository](https://github.com/mehrantsi/feoxdb)'
