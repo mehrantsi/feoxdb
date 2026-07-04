@@ -457,7 +457,7 @@ fn main() -> Result<()> {
     // If using persistence, ensure data is flushed
     if use_persistence {
         print!("\n{}Flushing to disk...{} ", ANSI_YELLOW, ANSI_RESET);
-        store.flush();
+        store.flush().unwrap();
         println!("{}Done!{}", ANSI_GREEN, ANSI_RESET);
     }
 

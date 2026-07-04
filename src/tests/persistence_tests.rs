@@ -15,7 +15,7 @@ fn test_basic_persistence() {
         store.insert(b"persist_key", b"persist_value").unwrap();
         store.insert(b"another_key", b"another_value").unwrap();
 
-        store.flush();
+        store.flush().unwrap();
     } // Store is dropped here
 
     // Reopen and verify data persisted
@@ -45,7 +45,7 @@ fn test_flush_all() {
     }
 
     // Force flush
-    store.flush_all();
+    store.flush_all().unwrap();
 
     // Data should be on disk even without dropping store
     assert_eq!(store.len(), 100);
@@ -93,7 +93,7 @@ fn test_value_offloading() {
     store.insert(b"large_key", &large_value).unwrap();
 
     // Force flush to disk
-    store.flush();
+    store.flush().unwrap();
 
     // Wait for write buffer to process
     thread::sleep(Duration::from_millis(100));
@@ -120,7 +120,7 @@ fn test_metadata_persistence() {
         }
 
         initial_count = store.len();
-        store.flush_all();
+        store.flush_all().unwrap();
     }
 
     // Reopen and verify metadata
@@ -158,7 +158,7 @@ fn test_concurrent_persistence() {
         handle.join().unwrap();
     }
 
-    store.flush_all();
+    store.flush_all().unwrap();
     drop(store);
 
     // Verify all data persisted
@@ -182,7 +182,7 @@ fn test_delete_persistence() {
         store.delete(b"del_key1").unwrap();
         store.delete(b"del_key2").unwrap();
 
-        store.flush_all();
+        store.flush_all().unwrap();
     }
 
     // Verify deletes persisted
@@ -210,7 +210,7 @@ fn test_update_persistence() {
         store.insert(b"update_key", b"value3").unwrap();
         store.insert(b"update_key", b"final_value").unwrap();
 
-        store.flush_all();
+        store.flush_all().unwrap();
     }
 
     // Verify only latest value persisted
@@ -238,7 +238,7 @@ fn test_atomic_increment_persistence() {
             store.atomic_increment(b"counter", 1).unwrap();
         }
 
-        store.flush_all();
+        store.flush_all().unwrap();
     }
 
     // Verify counter value persisted
@@ -265,7 +265,7 @@ fn test_range_query_persistence() {
             store.insert(key.as_bytes(), value.as_bytes()).unwrap();
         }
 
-        store.flush_all();
+        store.flush_all().unwrap();
     }
 
     // Verify range queries work after restart

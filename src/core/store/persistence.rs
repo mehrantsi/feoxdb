@@ -22,15 +22,15 @@ impl FeoxStore {
     /// # fn main() -> feoxdb::Result<()> {
     /// let store = FeoxStore::new(Some("/path/to/data.feox".to_string()))?;
     /// store.insert(b"important", b"data")?;
-    /// store.flush_all();  // Ensure data is persisted
+    /// store.flush_all()?;  // Ensure data is persisted
     /// # Ok(())
     /// # }
     /// ```
-    pub fn flush_all(&self) {
+    pub fn flush_all(&self) -> Result<()> {
         if !self.memory_only {
             // First flush the write buffer to ensure all data is written
             if let Some(ref wb) = self.write_buffer {
-                let _ = wb.force_flush();
+                wb.force_flush()?;
             }
 
             if let Some(ref disk_io) = self.disk_io {
@@ -42,10 +42,11 @@ impl FeoxStore {
                 metadata.update();
 
                 // Write metadata
-                let _ = disk_io.write().write_metadata(metadata.as_bytes());
-                let _ = disk_io.write().flush();
+                disk_io.write().write_metadata(metadata.as_bytes())?;
+                disk_io.write().flush()?;
             }
         }
+        Ok(())
     }
 
     pub(super) fn load_value_from_disk(&self, record: &Record) -> Result<Vec<u8>> {

@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
         // Force flush to disk
         println!("\n>>> Flushing to disk...");
-        store.flush();
+        store.flush().unwrap();
         thread::sleep(Duration::from_secs(5));
         println!(">>> Flush complete");
 
@@ -183,7 +183,7 @@ fn main() -> Result<()> {
 
         // Force flush and wait
         println!("\n>>> Flushing Phase 2 data to disk...");
-        store.flush();
+        store.flush().unwrap();
         thread::sleep(Duration::from_secs(5));
         println!(">>> Flush complete");
 

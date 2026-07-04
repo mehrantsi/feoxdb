@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::core::record::Record;
 use crate::core::ttl_sweep::TtlSweeper;
+use crate::error::Result;
 use crate::stats::Statistics;
 use crate::storage::free_space::FreeSpaceManager;
 use crate::storage::metadata::Metadata;
@@ -127,7 +128,7 @@ impl FeoxStore {
     }
 
     /// Flush all pending writes to disk (for persistent mode)
-    pub fn flush(&self) {
+    pub fn flush(&self) -> Result<()> {
         self.flush_all()
     }
 }

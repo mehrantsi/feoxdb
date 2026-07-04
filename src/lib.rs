@@ -89,7 +89,7 @@
 //! store.insert(b"persistent_key", b"persistent_value")?;
 //!
 //! // Flush to disk
-//! store.flush();
+//! store.flush()?;
 //! # Ok(())
 //! # }
 //! ```
