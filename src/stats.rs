@@ -198,11 +198,10 @@ impl Statistics {
         let avg_insert_latency = {
             let inserts = self.total_inserts.load(Ordering::Relaxed)
                 + self.total_updates.load(Ordering::Relaxed);
-            if inserts > 0 {
-                self.insert_latency_ns.load(Ordering::Relaxed) / inserts
-            } else {
-                0
-            }
+            self.insert_latency_ns
+                .load(Ordering::Relaxed)
+                .checked_div(inserts)
+                .unwrap_or(0)
         };
 
         let avg_delete_latency = if self.total_deletes.load(Ordering::Relaxed) > 0 {
