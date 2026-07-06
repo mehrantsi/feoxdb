@@ -100,7 +100,7 @@ impl FeoxStore {
 
     /// Check if a key exists
     pub fn contains_key(&self, key: &[u8]) -> bool {
-        self.hash_table.contains(key)
+        self.hash_table.contains_sync(key)
     }
 
     /// Get the number of records in the store

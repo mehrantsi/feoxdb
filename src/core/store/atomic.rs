@@ -136,7 +136,7 @@ impl FeoxStore {
 
         let key_vec = key.to_vec();
 
-        let result = match self.hash_table.entry(key_vec.clone()) {
+        let result = match self.hash_table.entry_sync(key_vec.clone()) {
             scc::hash_map::Entry::Occupied(mut entry) => {
                 let old_record = entry.get();
 
@@ -413,7 +413,7 @@ impl FeoxStore {
 
         // Phase 1: Check value and save record reference for version tracking
         let initial_record = {
-            let entry = match self.hash_table.read(&key_vec, |_, v| v.clone()) {
+            let entry = match self.hash_table.read_sync(&key_vec, |_, v| v.clone()) {
                 Some(e) => e,
                 None => return Ok(false), // Key doesn't exist
             };
@@ -442,7 +442,7 @@ impl FeoxStore {
         };
 
         // Phase 2: Acquire write lock and verify record hasn't changed
-        match self.hash_table.entry(key_vec.clone()) {
+        match self.hash_table.entry_sync(key_vec.clone()) {
             scc::hash_map::Entry::Occupied(mut entry) => {
                 let old_record = entry.get();
 

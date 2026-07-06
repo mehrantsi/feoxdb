@@ -78,7 +78,7 @@ impl FeoxStore {
         let current_value = {
             let record = self
                 .hash_table
-                .read(key, |_, v| v.clone())
+                .read_sync(key, |_, v| v.clone())
                 .ok_or(FeoxError::KeyNotFound)?;
 
             if timestamp < record.timestamp {

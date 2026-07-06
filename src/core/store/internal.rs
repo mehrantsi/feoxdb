@@ -39,7 +39,7 @@ impl FeoxStore {
         let new_size = self.calculate_record_size(old_record.key.len(), value.len());
 
         let old_record_arc =
-            if let Some(entry) = self.hash_table.read(&old_record.key, |_, v| v.clone()) {
+            if let Some(entry) = self.hash_table.read_sync(&old_record.key, |_, v| v.clone()) {
                 entry
             } else {
                 return Err(FeoxError::KeyNotFound);
@@ -48,7 +48,7 @@ impl FeoxStore {
         let key_vec = new_record.key.clone();
 
         self.hash_table
-            .upsert(key_vec.clone(), Arc::clone(&new_record));
+            .upsert_sync(key_vec.clone(), Arc::clone(&new_record));
         self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
 
         if new_size > old_size {
@@ -115,7 +115,7 @@ impl FeoxStore {
         let new_size = new_record.calculate_size();
 
         let old_record_arc =
-            if let Some(entry) = self.hash_table.read(&old_record.key, |_, v| v.clone()) {
+            if let Some(entry) = self.hash_table.read_sync(&old_record.key, |_, v| v.clone()) {
                 entry
             } else {
                 return Err(FeoxError::KeyNotFound);
@@ -124,7 +124,7 @@ impl FeoxStore {
         let key_vec = new_record.key.clone();
 
         self.hash_table
-            .upsert(key_vec.clone(), Arc::clone(&new_record));
+            .upsert_sync(key_vec.clone(), Arc::clone(&new_record));
         self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
 
         if new_size > old_size {

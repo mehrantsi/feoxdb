@@ -17,6 +17,8 @@ pub struct Statistics {
 
     // Operation latencies (in nanoseconds)
     pub get_latency_ns: AtomicU64,
+    pub keys_latency_ns: AtomicU64,
+    pub values_latency_ns: AtomicU64,
     pub insert_latency_ns: AtomicU64,
     pub delete_latency_ns: AtomicU64,
 
@@ -67,6 +69,8 @@ impl Statistics {
 
             // Operation latencies
             get_latency_ns: AtomicU64::new(0),
+            keys_latency_ns: AtomicU64::new(0),
+            values_latency_ns: AtomicU64::new(0),
             insert_latency_ns: AtomicU64::new(0),
             delete_latency_ns: AtomicU64::new(0),
 
@@ -111,6 +115,18 @@ impl Statistics {
         } else {
             self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Record a keys operation
+    pub fn record_keys(&self, latency_ns: u64) {
+        self.keys_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
+    }
+
+    /// Record a values operation
+    pub fn record_values(&self, latency_ns: u64) {
+        self.values_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
     }
 
     /// Record an insert operation

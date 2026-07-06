@@ -259,7 +259,7 @@ fn sample_and_expire_batch(store: &Arc<FeoxStore>, config: &TtlConfig) -> (u64, 
             // Check if expired
             if ttl_expiry > 0 && ttl_expiry < now {
                 // Remove expired entry
-                hash_table.remove(&key);
+                hash_table.remove_sync(&key);
                 store.remove_from_tree(&key);
 
                 expired += 1;
@@ -287,15 +287,16 @@ fn get_random_ttl_entry(
     let mut candidates = Vec::new();
     let mut count = 0;
 
-    hash_table.scan(|key: &Vec<u8>, value: &Arc<crate::core::record::Record>| {
+    hash_table.iter_sync(|key: &Vec<u8>, value: &Arc<crate::core::record::Record>| {
         if count >= 100 {
-            return; // Stop iteration
+            return false; // Stop iteration
         }
         count += 1;
 
         if value.ttl_expiry.load(Ordering::Relaxed) > 0 {
             candidates.push((key.clone(), value.clone()));
         }
+        true
     });
 
     if candidates.is_empty() {

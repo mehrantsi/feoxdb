@@ -158,8 +158,8 @@ impl FeoxStore {
         self.validate_key_value(key, value)?;
 
         // Check for existing record
-        let is_update = self.hash_table.contains(key);
-        let existing_record = self.hash_table.read(key, |_, v| v.clone());
+        let is_update = self.hash_table.contains_sync(key);
+        let existing_record = self.hash_table.read_sync(key, |_, v| v.clone());
         if let Some(existing_record) = existing_record {
             let existing_ts = existing_record.timestamp;
             let existing_clone = existing_record;
@@ -193,7 +193,7 @@ impl FeoxStore {
         let key_vec = record.key.clone();
 
         // Insert into hash table
-        self.hash_table.upsert(key_vec.clone(), Arc::clone(&record));
+        self.hash_table.upsert_sync(key_vec.clone(), Arc::clone(&record));
 
         // Insert into lock-free skip list for ordered access
         self.tree.insert(key_vec, Arc::clone(&record));
@@ -242,8 +242,8 @@ impl FeoxStore {
         }
 
         // Check for existing record
-        let is_update = self.hash_table.contains(key);
-        let existing_record = self.hash_table.read(key, |_, v| v.clone());
+        let is_update = self.hash_table.contains_sync(key);
+        let existing_record = self.hash_table.read_sync(key, |_, v| v.clone());
         if let Some(existing_record) = existing_record {
             let existing_ts = existing_record.timestamp;
 
@@ -290,7 +290,7 @@ impl FeoxStore {
         let key_vec = record.key.clone();
 
         // Insert into hash table
-        self.hash_table.upsert(key_vec.clone(), Arc::clone(&record));
+        self.hash_table.upsert_sync(key_vec.clone(), Arc::clone(&record));
 
         // Insert into skip list for ordered access
         self.tree.insert(key_vec, Arc::clone(&record));
@@ -369,7 +369,7 @@ impl FeoxStore {
 
         let record = self
             .hash_table
-            .read(key, |_, v| v.clone())
+            .read_sync(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
         // Check TTL expiry if TTL is enabled
@@ -436,7 +436,7 @@ impl FeoxStore {
     ///
     /// Significantly faster than `get()` for large values:
     /// * 100 bytes: ~15% faster
-    /// * 1KB: ~50% faster  
+    /// * 1KB: ~50% faster
     /// * 10KB: ~90% faster
     /// * 100KB: ~95% faster
     pub fn get_bytes(&self, key: &[u8]) -> Result<Bytes> {
@@ -455,7 +455,7 @@ impl FeoxStore {
 
         let record = self
             .hash_table
-            .read(key, |_, v| v.clone())
+            .read_sync(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
         // Check TTL expiry if TTL is enabled
@@ -488,6 +488,62 @@ impl FeoxStore {
         self.stats
             .record_get(start.elapsed().as_nanos() as u64, cache_hit);
         Ok(value)
+    }
+
+    /// Get all keys in the store.
+    ///
+    /// Always iterates the full hash table, regardless of cache state.
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        let start = std::time::Instant::now();
+
+        let mut keys = Vec::with_capacity(self.hash_table.len());
+        self.hash_table.iter_sync(|k, _| {
+            keys.push(k.to_owned());
+            true
+        });
+
+        self.stats
+            .record_keys(start.elapsed().as_nanos() as u64);
+        keys
+    }
+
+    /// Get all values in the store.
+    ///
+    /// Always iterates the full hash table, regardless of cache state.
+    /// In persisted mode, values that have been offloaded to disk are loaded automatically.
+    pub fn values(&self) -> Result<Vec<Vec<u8>>> {
+        let start = std::time::Instant::now();
+
+        let mut values = Vec::with_capacity(self.hash_table.len());
+        let mut disk_keys: Vec<Arc<Record>> = Vec::new();
+
+        self.hash_table.iter_sync(|_, v| {
+            if let Some(value) = v.get_value() {
+                values.push(value.to_vec());
+            } else {
+                disk_keys.push(Arc::clone(v));
+            }
+            true
+        });
+
+        // Load disk-offloaded values outside the hash table iteration
+        // Check the cache first before hitting disk
+        for record in &disk_keys {
+            let from_cache = if self.enable_caching {
+                self.cache.as_ref().and_then(|c| c.get(&record.key))
+            } else {
+                None
+            };
+            if let Some(cached) = from_cache {
+                values.push(cached.to_vec());
+            } else {
+                values.push(self.load_value_from_disk(record)?);
+            }
+        }
+
+        self.stats
+            .record_values(start.elapsed().as_nanos() as u64);
+        Ok(values)
     }
 
     /// Delete a key-value pair.
@@ -548,12 +604,12 @@ impl FeoxStore {
         self.validate_key(key)?;
 
         // Remove from hash table and get the record
-        let record_pair = self.hash_table.remove(key).ok_or(FeoxError::KeyNotFound)?;
+        let record_pair = self.hash_table.remove_sync(key).ok_or(FeoxError::KeyNotFound)?;
         let record = record_pair.1;
 
         if timestamp < record.timestamp {
             // Put it back if timestamp is older
-            self.hash_table.upsert(key.to_vec(), record);
+            self.hash_table.upsert_sync(key.to_vec(), record);
             return Err(FeoxError::OlderTimestamp);
         }
 
@@ -627,7 +683,7 @@ impl FeoxStore {
 
         let record = self
             .hash_table
-            .read(key, |_, v| v.clone())
+            .read_sync(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
         Ok(record.value_len)

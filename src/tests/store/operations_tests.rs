@@ -288,3 +288,165 @@ fn test_insert_bytes_with_slice() {
     let retrieved = store.get(b"slice_key").unwrap();
     assert_eq!(retrieved.as_slice(), &[2, 3, 4]);
 }
+
+#[test]
+fn test_keys_empty_store() {
+    let store = FeoxStore::new(None).unwrap();
+    let keys = store.keys();
+    assert!(keys.is_empty());
+}
+
+#[test]
+fn test_keys_returns_all_keys() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"key1", b"val1").unwrap();
+    store.insert(b"key2", b"val2").unwrap();
+    store.insert(b"key3", b"val3").unwrap();
+
+    let mut keys = store.keys();
+    keys.sort();
+    assert_eq!(keys.len(), 3);
+    assert_eq!(keys[0], b"key1");
+    assert_eq!(keys[1], b"key2");
+    assert_eq!(keys[2], b"key3");
+}
+
+#[test]
+fn test_keys_after_delete() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"a", b"1").unwrap();
+    store.insert(b"b", b"2").unwrap();
+    store.insert(b"c", b"3").unwrap();
+
+    store.delete(b"b").unwrap();
+
+    let mut keys = store.keys();
+    keys.sort();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], b"a");
+    assert_eq!(keys[1], b"c");
+}
+
+#[test]
+fn test_keys_after_update() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"key1", b"val1").unwrap();
+    store.insert(b"key1", b"val2").unwrap();
+
+    let keys = store.keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0], b"key1");
+}
+
+#[test]
+fn test_values_empty_store() {
+    let store = FeoxStore::new(None).unwrap();
+    let values = store.values().unwrap();
+    assert!(values.is_empty());
+}
+
+#[test]
+fn test_values_returns_all_values() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"key1", b"val1").unwrap();
+    store.insert(b"key2", b"val2").unwrap();
+    store.insert(b"key3", b"val3").unwrap();
+
+    let mut values = store.values().unwrap();
+    values.sort();
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0], b"val1");
+    assert_eq!(values[1], b"val2");
+    assert_eq!(values[2], b"val3");
+}
+
+#[test]
+fn test_values_after_delete() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"a", b"1").unwrap();
+    store.insert(b"b", b"2").unwrap();
+    store.insert(b"c", b"3").unwrap();
+
+    store.delete(b"b").unwrap();
+
+    let mut values = store.values().unwrap();
+    values.sort();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0], b"1");
+    assert_eq!(values[1], b"3");
+}
+
+#[test]
+fn test_values_after_update() {
+    let store = FeoxStore::new(None).unwrap();
+
+    store.insert(b"key1", b"old_value").unwrap();
+    store.insert(b"key1", b"new_value").unwrap();
+
+    let values = store.values().unwrap();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0], b"new_value");
+}
+
+#[test]
+fn test_keys_and_values_consistent() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let pairs: Vec<(&[u8], &[u8])> = vec![
+        (b"alpha", b"1"),
+        (b"beta", b"2"),
+        (b"gamma", b"3"),
+    ];
+
+    for (k, v) in &pairs {
+        store.insert(*k, *v).unwrap();
+    }
+
+    let keys = store.keys();
+    let values = store.values().unwrap();
+
+    assert_eq!(keys.len(), 3);
+    assert_eq!(values.len(), 3);
+
+    // Each key should have a corresponding value retrievable via get
+    for key in &keys {
+        let val = store.get(key).unwrap();
+        assert!(values.contains(&val));
+    }
+}
+
+#[test]
+fn test_keys_with_binary_data() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let key1 = vec![0x00, 0x01, 0x02];
+    let key2 = vec![0xFF, 0xFE, 0xFD];
+
+    store.insert(&key1, b"val1").unwrap();
+    store.insert(&key2, b"val2").unwrap();
+
+    let mut keys = store.keys();
+    keys.sort();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], key1);
+    assert_eq!(keys[1], key2);
+}
+
+#[test]
+fn test_values_large_values() {
+    let store = FeoxStore::new(None).unwrap();
+
+    let large_val = vec![0xAB; 50_000];
+    store.insert(b"large", &large_val).unwrap();
+    store.insert(b"small", b"tiny").unwrap();
+
+    let values = store.values().unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&large_val));
+    assert!(values.contains(&b"tiny".to_vec()));
+}

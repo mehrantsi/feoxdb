@@ -184,7 +184,7 @@ impl FeoxStore {
 
         let record = self
             .hash_table
-            .read(key, |_, v| v.clone())
+            .read_sync(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
         let ttl_expiry = record.ttl_expiry.load(Ordering::Acquire);
 
@@ -236,7 +236,7 @@ impl FeoxStore {
 
         let record = self
             .hash_table
-            .read(key, |_, v| v.clone())
+            .read_sync(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
         let new_expiry = if ttl_seconds > 0 {
