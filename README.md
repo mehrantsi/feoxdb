@@ -70,7 +70,7 @@ Q: What kind of applications would need this performance? Why these latency numb
 
 ```toml
 [dependencies]
-feoxdb = "0.5.1"
+feoxdb = "0.5.2"
 ```
 
 ### Basic Usage

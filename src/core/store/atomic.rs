@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -154,9 +155,22 @@ impl FeoxStore {
                 // Load value from memory or disk
                 let value = if let Some(val) = old_record.get_value() {
                     val.to_vec()
+                } else if let Some(value) = self
+                    .cache
+                    .as_ref()
+                    .and_then(|cache| cache.get_for_record(key, old_record))
+                {
+                    value.to_vec()
                 } else {
-                    // Try loading from disk if not in memory
-                    self.load_value_from_disk(old_record)?
+                    let value = self.load_value_from_disk(old_record)?;
+                    if let Some(ref cache) = self.cache {
+                        cache.insert_for_record(
+                            key_vec.clone(),
+                            Bytes::from(value.clone()),
+                            Arc::clone(old_record),
+                        );
+                    }
+                    value
                 };
 
                 let current_val = if value.len() == 8 {
@@ -424,10 +438,21 @@ impl FeoxStore {
             let value_matches = if let Some(val) = record_arc.get_value() {
                 // Fast path: value in memory
                 val.as_ref() == expected
+            } else if let Some(value) = self
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.get_for_record(key, &record_arc))
+            {
+                value.as_ref() == expected
             } else {
-                // Need disk I/O
-
                 let disk_value = self.load_value_from_disk(&record_arc)?;
+                if let Some(ref cache) = self.cache {
+                    cache.insert_for_record(
+                        key_vec.clone(),
+                        Bytes::from(disk_value.clone()),
+                        Arc::clone(&record_arc),
+                    );
+                }
                 disk_value == expected
             };
 

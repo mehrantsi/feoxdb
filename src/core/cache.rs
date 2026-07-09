@@ -1,4 +1,5 @@
 use crate::constants::*;
+use crate::core::record::Record;
 use crate::stats::Statistics;
 use crate::utils::hash::murmur3_32;
 use bytes::Bytes;
@@ -32,6 +33,7 @@ pub struct ClockCache {
 struct CacheEntry {
     key: Vec<u8>,
     value: Bytes,
+    record: Option<Arc<Record>>,
 
     /// Reference bit for CLOCK algorithm (accessed recently)
     reference_bit: Arc<AtomicBool>,
@@ -61,13 +63,26 @@ impl ClockCache {
 
     /// Get value from cache, setting reference bit on access
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.get_entry(key, None)
+    }
+
+    pub(crate) fn get_for_record(&self, key: &[u8], record: &Arc<Record>) -> Option<Bytes> {
+        self.get_entry(key, Some(record))
+    }
+
+    fn get_entry(&self, key: &[u8], record: Option<&Arc<Record>>) -> Option<Bytes> {
         let hash = murmur3_32(key, 0);
         let bucket_idx = (hash as usize) % CACHE_BUCKETS;
 
         let bucket = self.buckets[bucket_idx].read();
 
         for entry in bucket.iter() {
-            if entry.key == key {
+            let generation_matches = match (record, entry.record.as_ref()) {
+                (Some(expected), Some(cached)) => Arc::ptr_eq(cached, expected),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if entry.key == key && generation_matches {
                 // Set reference bit on access (CLOCK algorithm)
                 entry.reference_bit.store(true, Ordering::Release);
                 entry.access_count.fetch_add(1, Ordering::Relaxed);
@@ -80,6 +95,14 @@ impl ClockCache {
 
     /// Insert value into cache, triggering eviction if needed
     pub fn insert(&self, key: Vec<u8>, value: Bytes) {
+        self.insert_entry(key, value, None);
+    }
+
+    pub(crate) fn insert_for_record(&self, key: Vec<u8>, value: Bytes, record: Arc<Record>) {
+        self.insert_entry(key, value, Some(record));
+    }
+
+    fn insert_entry(&self, key: Vec<u8>, value: Bytes, record: Option<Arc<Record>>) {
         let size = key.len() + value.len() + std::mem::size_of::<CacheEntry>();
 
         // Don't cache very large values
@@ -105,6 +128,7 @@ impl ClockCache {
             if entry.key == key {
                 let old_size = entry.size;
                 entry.value = value;
+                entry.record = record;
                 entry.size = size;
                 entry.reference_bit.store(true, Ordering::Release);
 
@@ -126,6 +150,7 @@ impl ClockCache {
         let entry = CacheEntry {
             key,
             value,
+            record,
             reference_bit: Arc::new(AtomicBool::new(true)),
             size,
             access_count: Arc::new(AtomicU32::new(1)),

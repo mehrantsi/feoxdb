@@ -356,17 +356,6 @@ impl FeoxStore {
         let start = std::time::Instant::now();
         self.validate_key(key)?;
 
-        let mut cache_hit = false;
-        if self.enable_caching {
-            if let Some(ref cache) = self.cache {
-                if let Some(value) = cache.get(key) {
-                    self.stats
-                        .record_get(start.elapsed().as_nanos() as u64, true);
-                    return Ok(value.to_vec());
-                }
-            }
-        }
-
         let record = self
             .hash_table
             .read(key, |_, v| v.clone())
@@ -387,22 +376,27 @@ impl FeoxStore {
             }
         }
 
-        let value = if let Some(val) = record.get_value() {
-            val.to_vec()
+        let (value, cache_hit) = if let Some(value) = record.get_value() {
+            (value, true)
+        } else if let Some(value) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.get_for_record(key, &record))
+        {
+            (value, true)
         } else {
-            cache_hit = false; // Reading from disk
-            self.load_value_from_disk(&record)?
+            (Bytes::from(self.load_value_from_disk(&record)?), false)
         };
 
-        if self.enable_caching {
+        if !cache_hit {
             if let Some(ref cache) = self.cache {
-                cache.insert(key.to_vec(), Bytes::from(value.clone()));
+                cache.insert_for_record(key.to_vec(), value.clone(), Arc::clone(&record));
             }
         }
 
         self.stats
             .record_get(start.elapsed().as_nanos() as u64, cache_hit);
-        Ok(value)
+        Ok(value.to_vec())
     }
 
     /// Get a value by key without copying (zero-copy).
@@ -443,16 +437,6 @@ impl FeoxStore {
         let start = std::time::Instant::now();
         self.validate_key(key)?;
 
-        if self.enable_caching {
-            if let Some(ref cache) = self.cache {
-                if let Some(value) = cache.get(key) {
-                    self.stats
-                        .record_get(start.elapsed().as_nanos() as u64, true);
-                    return Ok(value);
-                }
-            }
-        }
-
         let record = self
             .hash_table
             .read(key, |_, v| v.clone())
@@ -475,13 +459,19 @@ impl FeoxStore {
 
         let (value, cache_hit) = if let Some(val) = record.get_value() {
             (val, true)
+        } else if let Some(value) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.get_for_record(key, &record))
+        {
+            (value, true)
         } else {
             (Bytes::from(self.load_value_from_disk(&record)?), false)
         };
 
-        if self.enable_caching {
+        if !cache_hit {
             if let Some(ref cache) = self.cache {
-                cache.insert(key.to_vec(), value.clone());
+                cache.insert_for_record(key.to_vec(), value.clone(), Arc::clone(&record));
             }
         }
 

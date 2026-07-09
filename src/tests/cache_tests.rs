@@ -1,8 +1,13 @@
 use crate::constants::*;
 use crate::core::cache::ClockCache;
+use crate::core::record::Record;
 use crate::stats::Statistics;
 use bytes::Bytes;
 use std::sync::Arc;
+
+fn record(key: &[u8], value: &Bytes, timestamp: u64) -> Arc<Record> {
+    Arc::new(Record::new(key.to_vec(), value.to_vec(), timestamp))
+}
 
 #[test]
 fn test_basic_cache_operations() {
@@ -46,7 +51,6 @@ fn test_reference_bit_behavior() {
     let stats = Arc::new(Statistics::new());
     let cache = ClockCache::new(stats);
 
-    // Insert entries
     for i in 0..100 {
         let key = format!("key_{}", i).into_bytes();
         let value = Bytes::from(format!("value_{}", i));
@@ -68,7 +72,6 @@ fn test_cache_clear() {
     let stats = Arc::new(Statistics::new());
     let cache = ClockCache::new(stats.clone());
 
-    // Insert some entries
     for i in 0..10 {
         let key = format!("key_{}", i).into_bytes();
         let value = Bytes::from(format!("value_{}", i));
@@ -96,14 +99,18 @@ fn test_cache_update_existing() {
     let key = b"test_key".to_vec();
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("much_longer_value2");
+    let record1 = record(&key, &value1, 1);
+    let record2 = record(&key, &value2, 2);
 
     // Insert initial value
-    cache.insert(key.clone(), value1.clone());
-    assert_eq!(cache.get(&key).unwrap(), value1);
+    cache.insert_for_record(key.clone(), value1.clone(), Arc::clone(&record1));
+    assert_eq!(cache.get_for_record(&key, &record1).unwrap(), value1);
+    assert!(cache.get_for_record(&key, &record2).is_none());
 
     // Update with new value
-    cache.insert(key.clone(), value2.clone());
-    assert_eq!(cache.get(&key).unwrap(), value2);
+    cache.insert_for_record(key.clone(), value2.clone(), Arc::clone(&record2));
+    assert!(cache.get_for_record(&key, &record1).is_none());
+    assert_eq!(cache.get_for_record(&key, &record2).unwrap(), value2);
 }
 
 #[test]

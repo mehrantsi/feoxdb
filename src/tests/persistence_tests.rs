@@ -251,6 +251,24 @@ fn test_atomic_increment_persistence() {
 }
 
 #[test]
+fn test_atomic_operations_reuse_versioned_cache() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+    let store = FeoxStore::new(Some(path)).unwrap();
+
+    store.insert(b"control", b"stable:1").unwrap();
+    store.flush_all().unwrap();
+
+    assert_eq!(store.get(b"control").unwrap(), b"stable:1");
+    let reads_after_get = store.stats().disk_reads;
+
+    assert!(store
+        .compare_and_swap(b"control", b"stable:1", b"applying:2")
+        .unwrap());
+    assert_eq!(store.stats().disk_reads, reads_after_get);
+}
+
+#[test]
 fn test_range_query_persistence() {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_str().unwrap().to_string();
