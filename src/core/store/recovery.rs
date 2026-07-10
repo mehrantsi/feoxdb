@@ -50,9 +50,9 @@ impl FeoxStore {
         let format = get_format(metadata_version);
 
         let total_sectors = self.device_size / FEOX_BLOCK_SIZE as u64;
+        let occupied_len = usize::try_from(total_sectors).map_err(|_| FeoxError::InvalidDevice)?;
         let mut sector: u64 = 1;
-        let mut _records_loaded = 0;
-        let mut occupied_sectors = Vec::new();
+        let mut occupied_sectors = vec![false; occupied_len];
 
         while sector < total_sectors {
             let data = match disk_io.read().read_sectors_sync(sector, 1) {
@@ -120,10 +120,41 @@ impl FeoxStore {
 
             let record_arc = Arc::new(record);
             let key_len = key.len();
+
+            let existing = self.hash_table.read(&key, |_, record| Arc::clone(record));
+            if existing
+                .as_ref()
+                .is_some_and(|record| record.timestamp > timestamp)
+            {
+                sector += sectors_needed as u64;
+                continue;
+            }
+
+            if let Some(existing) = existing {
+                let existing_sectors = format
+                    .total_size(existing.key.len(), existing.value_len)
+                    .div_ceil(FEOX_BLOCK_SIZE);
+                set_occupied(
+                    &mut occupied_sectors,
+                    existing.sector.load(Ordering::Acquire),
+                    existing_sectors,
+                    false,
+                )?;
+                self.stats.memory_usage.fetch_sub(
+                    self.calculate_record_size(existing.key.len(), existing.value_len),
+                    Ordering::AcqRel,
+                );
+                self.stats.disk_usage.fetch_sub(
+                    (existing_sectors * FEOX_BLOCK_SIZE) as u64,
+                    Ordering::AcqRel,
+                );
+            } else {
+                self.stats.record_count.fetch_add(1, Ordering::AcqRel);
+            }
+
             self.hash_table.upsert(key.clone(), Arc::clone(&record_arc));
             self.tree.insert(key, Arc::clone(&record_arc));
 
-            self.stats.record_count.fetch_add(1, Ordering::AcqRel);
             let record_size = self.calculate_record_size(key_len, value_len);
             self.stats
                 .memory_usage
@@ -134,21 +165,16 @@ impl FeoxStore {
                 .disk_usage
                 .fetch_add((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::AcqRel);
 
-            for i in 0..sectors_needed {
-                occupied_sectors.push(sector + i as u64);
-            }
-
-            _records_loaded += 1;
+            set_occupied(&mut occupied_sectors, sector, sectors_needed, true)?;
             sector += sectors_needed as u64;
         }
 
-        // Now rebuild free space from gaps between occupied sectors
-        occupied_sectors.sort_unstable();
-
-        // Start after metadata sectors (sectors 0-15 are reserved)
         let mut last_end = FEOX_DATA_START_BLOCK;
 
-        for &occupied_start in &occupied_sectors {
+        for occupied_start in FEOX_DATA_START_BLOCK..total_sectors {
+            if !occupied_sectors[occupied_start as usize] {
+                continue;
+            }
             if occupied_start > last_end {
                 self.free_space
                     .write()
@@ -165,4 +191,14 @@ impl FeoxStore {
 
         Ok(())
     }
+}
+
+fn set_occupied(occupied: &mut [bool], sector: u64, sectors: usize, value: bool) -> Result<()> {
+    let start = usize::try_from(sector).map_err(|_| FeoxError::CorruptedRecord)?;
+    let end = start
+        .checked_add(sectors)
+        .filter(|end| *end <= occupied.len())
+        .ok_or(FeoxError::CorruptedRecord)?;
+    occupied[start..end].fill(value);
+    Ok(())
 }

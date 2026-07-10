@@ -1,3 +1,4 @@
+use ahash::RandomState;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use crossbeam_utils::CachePadded;
 use parking_lot::{Mutex, RwLock};
@@ -64,6 +65,9 @@ pub struct WriteBuffer {
 
     /// Shared statistics
     stats: Arc<Statistics>,
+
+    /// Stable per-store key hasher for preserving per-key write order
+    shard_hasher: RandomState,
 
     /// Format version for record serialization
     format_version: u32,
@@ -146,6 +150,7 @@ impl WriteBuffer {
             periodic_flush_handle: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             stats,
+            shard_hasher: RandomState::new(),
             format_version,
         }
     }
@@ -161,6 +166,7 @@ impl WriteBuffer {
             return Err(FeoxError::ShuttingDown);
         }
 
+        let shard_id = self.get_shard_id(&record.key);
         let entry = WriteEntry {
             op,
             record,
@@ -170,8 +176,6 @@ impl WriteBuffer {
             timestamp: Instant::now(),
         };
 
-        // Get thread's consistent shard
-        let shard_id = self.get_shard_id();
         let buffer = &self.sharded_buffers[shard_id];
 
         buffer.add_entry(entry)?;
@@ -201,7 +205,7 @@ impl WriteBuffer {
         }
 
         // Start workers, each owning one shard
-        for worker_id in 0..actual_workers {
+        for (worker_id, flush_rx) in receivers.into_iter().enumerate() {
             let ctx = WorkerContext {
                 worker_id,
                 disk_io: self.disk_io.clone(),
@@ -211,9 +215,6 @@ impl WriteBuffer {
                 stats: self.stats.clone(),
                 format_version: self.format_version,
             };
-
-            // Note: pop() gives us receivers in reverse order, so worker N gets receiver 0
-            let flush_rx = receivers.pop().unwrap();
 
             let handle = thread::spawn(move || {
                 write_buffer_worker(ctx, flush_rx);
@@ -238,9 +239,7 @@ impl WriteBuffer {
                     let count = buffer.count.load(Ordering::Relaxed);
                     if count > 0 && shard_id < worker_channels.len() {
                         let req = FlushRequest { response: None };
-                        // Workers were assigned channels in reverse order due to pop()
-                        let channel_idx = worker_channels.len() - 1 - shard_id;
-                        let _ = worker_channels[channel_idx].try_send(req);
+                        let _ = worker_channels[shard_id].try_send(req);
                     }
                 }
             }
@@ -314,24 +313,8 @@ impl WriteBuffer {
     }
 
     #[inline]
-    fn get_shard_id(&self) -> usize {
-        thread_local! {
-            static THREAD_SHARD_ID: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-        }
-
-        THREAD_SHARD_ID.with(|id| {
-            if let Some(cpu_id) = id.get() {
-                cpu_id
-            } else {
-                // Assign a shard based on thread hash for consistency
-                use std::collections::hash_map::RandomState;
-                use std::hash::BuildHasher;
-                let shard_id = RandomState::new().hash_one(std::thread::current().id()) as usize
-                    % self.sharded_buffers.len();
-                id.set(Some(shard_id));
-                shard_id
-            }
-        })
+    fn get_shard_id(&self, key: &[u8]) -> usize {
+        self.shard_hasher.hash_one(key) as usize % self.sharded_buffers.len()
     }
 }
 
@@ -409,6 +392,7 @@ fn process_write_batch(
     stats: &Arc<Statistics>,
     format: &dyn RecordFormat,
 ) -> Result<()> {
+    let mut pending_writes = Vec::new();
     let mut batch_writes = Vec::new();
     let mut delete_operations = Vec::new();
     let mut records_to_clear = Vec::new();
@@ -423,21 +407,16 @@ fn process_write_batch(
                 {
                     let data = prepare_record_data(&entry.record, format)?;
                     let sectors_needed = data.len().div_ceil(FEOX_BLOCK_SIZE);
-                    let sector = free_space.write().allocate_sectors(sectors_needed as u64)?;
-
-                    // Track disk usage
-                    stats
-                        .disk_usage
-                        .fetch_add((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::Relaxed);
-
-                    batch_writes.push((sector, data));
-                    records_to_clear.push((sector, entry.record.clone()));
+                    pending_writes.push((data, sectors_needed, entry.record));
                 }
             }
             Operation::Delete => {
                 let sector = entry.record.sector.load(Ordering::Acquire);
                 if sector != 0 {
-                    delete_operations.push((sector, entry.record.key.len(), entry.old_value_len));
+                    let sectors_needed = format
+                        .total_size(entry.record.key.len(), entry.old_value_len)
+                        .div_ceil(FEOX_BLOCK_SIZE);
+                    delete_operations.push((sector, sectors_needed));
                 }
             }
             _ => {}
@@ -445,25 +424,38 @@ fn process_write_batch(
     }
 
     // Process deletes first
-    for (sector, key_len, value_len) in delete_operations {
+    for (sector, sectors_needed) in delete_operations {
         // Write deletion marker
         let mut deletion_marker = vec![0u8; FEOX_BLOCK_SIZE];
         deletion_marker[..8].copy_from_slice(b"\0DELETED");
 
-        let _ = disk_io.write().write_sectors_sync(sector, &deletion_marker);
-
-        // Calculate sectors used and release them
-        let total_size = SECTOR_HEADER_SIZE + 2 + key_len + 8 + 8 + value_len;
-        let sectors_needed = total_size.div_ceil(FEOX_BLOCK_SIZE);
-
-        let _ = free_space
+        disk_io
             .write()
-            .release_sectors(sector, sectors_needed as u64);
+            .write_sectors_sync(sector, &deletion_marker)?;
+
+        free_space
+            .write()
+            .release_sectors(sector, sectors_needed as u64)?;
 
         // Update disk usage
         stats
             .disk_usage
             .fetch_sub((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::Relaxed);
+    }
+
+    for (data, sectors_needed, record) in pending_writes {
+        let sector = match free_space.write().allocate_sectors(sectors_needed as u64) {
+            Ok(sector) => sector,
+            Err(error) => {
+                release_allocations(free_space, &records_to_clear, stats)?;
+                return Err(error);
+            }
+        };
+        stats
+            .disk_usage
+            .fetch_add((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::Relaxed);
+        batch_writes.push((sector, data));
+        records_to_clear.push((sector, sectors_needed, record));
     }
 
     // Process batch writes with io_uring
@@ -478,7 +470,7 @@ fn process_write_batch(
 
             match result {
                 Ok(()) => {
-                    for (sector, record) in &records_to_clear {
+                    for (sector, _, record) in &records_to_clear {
                         record.sector.store(*sector, Ordering::Release);
                         std::sync::atomic::fence(Ordering::Release);
                         record.clear_value();
@@ -500,9 +492,7 @@ fn process_write_batch(
                         delay_us *= 2;
                     } else {
                         stats.record_write_failed();
-                        for (sector, _) in &records_to_clear {
-                            free_space.write().release_sectors(*sector, 1)?;
-                        }
+                        release_allocations(free_space, &records_to_clear, stats)?;
                         return Err(e);
                     }
                 }
@@ -510,6 +500,23 @@ fn process_write_batch(
         }
     }
 
+    Ok(())
+}
+
+fn release_allocations(
+    free_space: &Arc<RwLock<FreeSpaceManager>>,
+    allocations: &[(u64, usize, Arc<Record>)],
+    stats: &Statistics,
+) -> Result<()> {
+    for (sector, sectors_needed, _) in allocations {
+        free_space
+            .write()
+            .release_sectors(*sector, *sectors_needed as u64)?;
+        stats.disk_usage.fetch_sub(
+            (*sectors_needed * FEOX_BLOCK_SIZE) as u64,
+            Ordering::Relaxed,
+        );
+    }
     Ok(())
 }
 

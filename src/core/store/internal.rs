@@ -47,6 +47,7 @@ impl FeoxStore {
 
         let key_vec = new_record.key.clone();
 
+        old_record_arc.refcount.store(0, Ordering::Release);
         self.hash_table
             .upsert(key_vec.clone(), Arc::clone(&new_record));
         self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
@@ -123,6 +124,7 @@ impl FeoxStore {
 
         let key_vec = new_record.key.clone();
 
+        old_record_arc.refcount.store(0, Ordering::Release);
         self.hash_table
             .upsert(key_vec.clone(), Arc::clone(&new_record));
         self.tree.insert(key_vec.clone(), Arc::clone(&new_record));

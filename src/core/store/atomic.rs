@@ -205,6 +205,7 @@ impl FeoxStore {
                 let old_record_arc = Arc::clone(old_record);
 
                 // Atomically update the entry
+                old_record_arc.refcount.store(0, Ordering::Release);
                 entry.insert(Arc::clone(&new_record));
 
                 // Update skip list as well
@@ -509,6 +510,7 @@ impl FeoxStore {
                     Arc::new(Record::new(key.to_vec(), new_value.to_vec(), timestamp))
                 };
 
+                old_record_arc.refcount.store(0, Ordering::Release);
                 entry.insert(Arc::clone(&new_record));
 
                 self.tree.insert(key_vec.clone(), Arc::clone(&new_record));

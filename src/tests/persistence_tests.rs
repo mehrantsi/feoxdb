@@ -1,7 +1,14 @@
+use crate::constants::{FEOX_BLOCK_SIZE, FEOX_DATA_START_BLOCK, SECTOR_MARKER};
+use crate::core::record::Record;
 use crate::core::store::FeoxStore;
+use crate::storage::format::{FormatV2, RecordFormat};
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::thread;
 use std::time::Duration;
 use tempfile::NamedTempFile;
+
+const TEST_DEVICE_SIZE: u64 = 2 * 1024 * 1024;
 
 #[test]
 fn test_basic_persistence() {
@@ -266,6 +273,100 @@ fn test_atomic_operations_reuse_versioned_cache() {
         .compare_and_swap(b"control", b"stable:1", b"applying:2")
         .unwrap());
     assert_eq!(store.stats().disk_reads, reads_after_get);
+}
+
+#[test]
+fn test_superseded_buffered_record_does_not_reappear_after_reopen() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+
+    {
+        let store = FeoxStore::builder()
+            .device_path(path.clone())
+            .file_size(TEST_DEVICE_SIZE)
+            .build()
+            .unwrap();
+        store.insert(b"hole", b"value").unwrap();
+        store.flush().unwrap();
+
+        let zero = 0_i64.to_le_bytes();
+        assert_eq!(store.atomic_increment(b"control", 0).unwrap(), 0);
+        assert!(store
+            .compare_and_swap(b"control", &zero, b"first-state")
+            .unwrap());
+        store.flush().unwrap();
+
+        store.delete(b"hole").unwrap();
+        store.flush().unwrap();
+        assert!(store
+            .compare_and_swap(b"control", b"first-state", b"current-state")
+            .unwrap());
+        store.flush().unwrap();
+    }
+
+    let reopened = FeoxStore::new(Some(path)).unwrap();
+    assert_eq!(reopened.get(b"control").unwrap(), b"current-state");
+}
+
+#[test]
+fn test_recovery_prefers_newest_timestamp_over_sector_order() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+
+    {
+        let store = FeoxStore::builder()
+            .device_path(path.clone())
+            .file_size(TEST_DEVICE_SIZE)
+            .build()
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    write_test_record(
+        &mut file,
+        FEOX_DATA_START_BLOCK,
+        b"duplicate",
+        b"newest",
+        200,
+    );
+    write_test_record(
+        &mut file,
+        FEOX_DATA_START_BLOCK + 1,
+        b"duplicate",
+        b"stale",
+        100,
+    );
+    file.sync_all().unwrap();
+    drop(file);
+
+    let reopened = FeoxStore::new(Some(path)).unwrap();
+    assert_eq!(reopened.get(b"duplicate").unwrap(), b"newest");
+    assert_eq!(reopened.len(), 1);
+}
+
+fn write_test_record(
+    file: &mut std::fs::File,
+    sector: u64,
+    key: &[u8],
+    value: &[u8],
+    timestamp: u64,
+) {
+    let format = FormatV2;
+    let record = Record::new(key.to_vec(), value.to_vec(), timestamp);
+    let mut bytes = Vec::with_capacity(FEOX_BLOCK_SIZE);
+    bytes.extend_from_slice(&SECTOR_MARKER.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&format.serialize_record(&record, true));
+    assert!(bytes.len() <= FEOX_BLOCK_SIZE);
+    bytes.resize(FEOX_BLOCK_SIZE, 0);
+    file.seek(SeekFrom::Start(sector * FEOX_BLOCK_SIZE as u64))
+        .unwrap();
+    file.write_all(&bytes).unwrap();
 }
 
 #[test]
