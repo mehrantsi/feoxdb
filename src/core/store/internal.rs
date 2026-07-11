@@ -71,17 +71,8 @@ impl FeoxStore {
             }
 
             if let Some(ref wb) = self.write_buffer {
-                if let Err(e) =
-                    wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)
-                {
-                    // Data operation succeeded in memory
-                    let _ = e;
-                }
-
-                if let Err(e) = wb.add_write(Operation::Delete, old_record_arc, old_value_len) {
-                    // Data operation succeeded in memory
-                    let _ = e;
-                }
+                wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)?;
+                wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
             }
         }
 
@@ -148,17 +139,8 @@ impl FeoxStore {
             }
 
             if let Some(ref wb) = self.write_buffer {
-                if let Err(e) =
-                    wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)
-                {
-                    // Data operation succeeded in memory
-                    let _ = e;
-                }
-
-                if let Err(e) = wb.add_write(Operation::Delete, old_record_arc, old_value_len) {
-                    // Data operation succeeded in memory
-                    let _ = e;
-                }
+                wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)?;
+                wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
             }
         }
 

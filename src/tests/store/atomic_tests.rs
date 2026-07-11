@@ -66,6 +66,47 @@ fn test_atomic_increment_saturation() {
 }
 
 #[test]
+fn test_insert_if_absent_preserves_first_value() {
+    let store = FeoxStore::new(None).unwrap();
+
+    assert!(store.insert_if_absent(b"job", b"first").unwrap());
+    assert!(!store.insert_if_absent(b"job", b"second").unwrap());
+    assert_eq!(store.get(b"job").unwrap(), b"first");
+}
+
+#[test]
+fn test_insert_if_absent_has_one_concurrent_winner() {
+    let store = Arc::new(FeoxStore::new(None).unwrap());
+    let barrier = Arc::new(Barrier::new(16));
+    let handles = (0..16)
+        .map(|index| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let value = index.to_string();
+                barrier.wait();
+                (
+                    value.clone(),
+                    store.insert_if_absent(b"job", value.as_bytes()).unwrap(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    let winners = results
+        .iter()
+        .filter(|(_, inserted)| *inserted)
+        .collect::<Vec<_>>();
+
+    assert_eq!(winners.len(), 1);
+    assert_eq!(store.get(b"job").unwrap(), winners[0].0.as_bytes());
+}
+
+#[test]
 fn test_cas_basic() {
     let store = FeoxStore::new(None).unwrap();
 

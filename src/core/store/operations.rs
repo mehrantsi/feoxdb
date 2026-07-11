@@ -210,10 +210,7 @@ impl FeoxStore {
         if !self.memory_only {
             // Queue for persistence if write buffer exists
             if let Some(ref wb) = self.write_buffer {
-                if let Err(_e) = wb.add_write(Operation::Insert, record, 0) {
-                    // Don't fail the insert - data is still in memory
-                    // Return code already indicates success since data is in memory
-                }
+                wb.add_write(Operation::Insert, record, 0)?;
             }
         }
 
@@ -307,9 +304,7 @@ impl FeoxStore {
         if !self.memory_only {
             // Queue for persistence if write buffer exists
             if let Some(ref wb) = self.write_buffer {
-                if let Err(_e) = wb.add_write(Operation::Insert, record, 0) {
-                    // Don't fail the insert - data is still in memory
-                }
+                wb.add_write(Operation::Insert, record, 0)?;
             }
         }
 
@@ -572,9 +567,7 @@ impl FeoxStore {
         // Queue deletion for persistence if write buffer exists and not memory-only
         if !self.memory_only {
             if let Some(ref wb) = self.write_buffer {
-                if let Err(_e) = wb.add_write(Operation::Delete, record, old_value_len) {
-                    // Silent failure - data operation succeeded in memory
-                }
+                wb.add_write(Operation::Delete, record, old_value_len)?;
             }
         }
 

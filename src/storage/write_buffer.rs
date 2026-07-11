@@ -423,26 +423,6 @@ fn process_write_batch(
         }
     }
 
-    // Process deletes first
-    for (sector, sectors_needed) in delete_operations {
-        // Write deletion marker
-        let mut deletion_marker = vec![0u8; FEOX_BLOCK_SIZE];
-        deletion_marker[..8].copy_from_slice(b"\0DELETED");
-
-        disk_io
-            .write()
-            .write_sectors_sync(sector, &deletion_marker)?;
-
-        free_space
-            .write()
-            .release_sectors(sector, sectors_needed as u64)?;
-
-        // Update disk usage
-        stats
-            .disk_usage
-            .fetch_sub((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::Relaxed);
-    }
-
     for (data, sectors_needed, record) in pending_writes {
         let sector = match free_space.write().allocate_sectors(sectors_needed as u64) {
             Ok(sector) => sector,
@@ -460,6 +440,10 @@ fn process_write_batch(
 
     // Process batch writes with io_uring
     if !batch_writes.is_empty() {
+        if !delete_operations.is_empty() {
+            crash_at("before_replacement_write");
+        }
+
         // Use io_uring with retry
         let mut retries = 3;
         let mut delay_us = 100;
@@ -470,6 +454,9 @@ fn process_write_batch(
 
             match result {
                 Ok(()) => {
+                    if !delete_operations.is_empty() {
+                        crash_at("after_replacement_write");
+                    }
                     for (sector, _, record) in &records_to_clear {
                         record.sector.store(*sector, Ordering::Release);
                         std::sync::atomic::fence(Ordering::Release);
@@ -500,8 +487,36 @@ fn process_write_batch(
         }
     }
 
+    for (sector, sectors_needed) in delete_operations {
+        let mut deletion_marker = vec![0u8; FEOX_BLOCK_SIZE];
+        deletion_marker[..8].copy_from_slice(b"\0DELETED");
+
+        disk_io
+            .write()
+            .write_sectors_sync(sector, &deletion_marker)?;
+
+        free_space
+            .write()
+            .release_sectors(sector, sectors_needed as u64)?;
+
+        stats
+            .disk_usage
+            .fetch_sub((sectors_needed * FEOX_BLOCK_SIZE) as u64, Ordering::Relaxed);
+    }
+
     Ok(())
 }
+
+#[cfg(test)]
+fn crash_at(point: &str) {
+    if std::env::var("FEOX_TEST_CRASH_POINT").as_deref() == Ok(point) {
+        std::process::exit(86);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn crash_at(_: &str) {}
 
 fn release_allocations(
     free_space: &Arc<RwLock<FreeSpaceManager>>,

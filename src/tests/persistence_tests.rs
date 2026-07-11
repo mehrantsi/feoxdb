@@ -4,11 +4,13 @@ use crate::core::store::FeoxStore;
 use crate::storage::format::{FormatV2, RecordFormat};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const TEST_DEVICE_SIZE: u64 = 2 * 1024 * 1024;
+const CRASH_HELPER: &str = "tests::persistence_tests::persistent_update_crash_helper";
 
 #[test]
 fn test_basic_persistence() {
@@ -227,6 +229,64 @@ fn test_update_persistence() {
         let value = store.get(b"update_key").unwrap();
         assert_eq!(value, b"final_value");
     }
+}
+
+#[test]
+fn test_insert_if_absent_persistence() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+
+    {
+        let store = FeoxStore::new(Some(path.clone())).unwrap();
+        assert!(store.insert_if_absent(b"job", b"first").unwrap());
+        assert!(!store.insert_if_absent(b"job", b"second").unwrap());
+        store.flush().unwrap();
+    }
+
+    let reopened = FeoxStore::new(Some(path)).unwrap();
+    assert_eq!(reopened.get(b"job").unwrap(), b"first");
+}
+
+#[test]
+fn test_persistent_update_keeps_old_value_before_replacement_write() {
+    assert_update_crash_recovery("before_replacement_write", b"old");
+}
+
+#[test]
+fn test_persistent_update_keeps_new_value_after_replacement_write() {
+    assert_update_crash_recovery("after_replacement_write", b"new");
+}
+
+#[test]
+fn persistent_update_crash_helper() {
+    let Ok(path) = std::env::var("FEOX_TEST_CRASH_PATH") else {
+        return;
+    };
+
+    let store = FeoxStore::builder()
+        .device_path(path)
+        .file_size(TEST_DEVICE_SIZE)
+        .build()
+        .unwrap();
+    store.insert(b"state", b"old").unwrap();
+    store.flush().unwrap();
+    store.insert(b"state", b"new").unwrap();
+    store.flush().unwrap();
+    panic!("crash point was not reached");
+}
+
+fn assert_update_crash_recovery(point: &str, expected: &[u8]) {
+    let temp_file = NamedTempFile::new().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", CRASH_HELPER, "--nocapture"])
+        .env("FEOX_TEST_CRASH_PATH", temp_file.path())
+        .env("FEOX_TEST_CRASH_POINT", point)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(86));
+    let reopened = FeoxStore::new(Some(temp_file.path().to_string_lossy().into_owned())).unwrap();
+    assert_eq!(reopened.get(b"state").unwrap(), expected);
 }
 
 #[test]

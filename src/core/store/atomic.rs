@@ -231,19 +231,8 @@ impl FeoxStore {
                     }
 
                     if let Some(ref wb) = self.write_buffer {
-                        if let Err(e) =
-                            wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)
-                        {
-                            // Atomic operation succeeded in memory
-                            let _ = e;
-                        }
-
-                        if let Err(e) =
-                            wb.add_write(Operation::Delete, old_record_arc, old_value_len)
-                        {
-                            // Atomic operation succeeded in memory
-                            let _ = e;
-                        }
+                        wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)?;
+                        wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
                     }
                 }
 
@@ -288,11 +277,7 @@ impl FeoxStore {
                 // Handle persistence if needed
                 if !self.memory_only {
                     if let Some(ref wb) = self.write_buffer {
-                        if let Err(e) = wb.add_write(Operation::Insert, Arc::clone(&new_record), 0)
-                        {
-                            // Operation succeeded in memory
-                            let _ = e;
-                        }
+                        wb.add_write(Operation::Insert, Arc::clone(&new_record), 0)?;
                     }
                 }
 
@@ -301,6 +286,67 @@ impl FeoxStore {
         };
 
         result
+    }
+
+    /// Insert a key only when it does not already exist.
+    ///
+    /// The existence check and insertion happen under the hash-table entry guard, so
+    /// concurrent callers cannot both create the same key.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` when this call inserted the key and `Ok(false)` when another
+    /// value already exists.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use feoxdb::FeoxStore;
+    /// # fn main() -> feoxdb::Result<()> {
+    /// let store = FeoxStore::new(None)?;
+    /// assert!(store.insert_if_absent(b"job:1", b"first")?);
+    /// assert!(!store.insert_if_absent(b"job:1", b"second")?);
+    /// assert_eq!(store.get(b"job:1")?, b"first");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn insert_if_absent(&self, key: &[u8], value: &[u8]) -> Result<bool> {
+        let start = std::time::Instant::now();
+        self.validate_key_value(key, value)?;
+        let key_vec = key.to_vec();
+
+        match self.hash_table.entry(key_vec.clone()) {
+            scc::hash_map::Entry::Occupied(_) => Ok(false),
+            scc::hash_map::Entry::Vacant(entry) => {
+                let record_size = self.calculate_record_size(key.len(), value.len());
+                if !self.check_memory_limit(record_size) {
+                    return Err(FeoxError::OutOfMemory);
+                }
+
+                let record = Arc::new(Record::new(
+                    key_vec.clone(),
+                    value.to_vec(),
+                    self.get_timestamp(),
+                ));
+                let _entry = entry.insert_entry(Arc::clone(&record));
+
+                self.tree.insert(key_vec, Arc::clone(&record));
+                self.stats.record_count.fetch_add(1, Ordering::AcqRel);
+                self.stats
+                    .memory_usage
+                    .fetch_add(record_size, Ordering::AcqRel);
+                self.stats
+                    .record_insert(start.elapsed().as_nanos() as u64, false);
+
+                if !self.memory_only {
+                    if let Some(ref write_buffer) = self.write_buffer {
+                        write_buffer.add_write(Operation::Insert, record, 0)?;
+                    }
+                }
+
+                Ok(true)
+            }
+        }
     }
 
     /// Atomically compare and swap a value.
@@ -536,8 +582,8 @@ impl FeoxStore {
                     }
 
                     if let Some(ref wb) = self.write_buffer {
-                        let _ = wb.add_write(Operation::Update, new_record, old_value_len);
-                        let _ = wb.add_write(Operation::Delete, old_record_arc, old_value_len);
+                        wb.add_write(Operation::Update, new_record, old_value_len)?;
+                        wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
                     }
                 }
 

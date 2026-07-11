@@ -356,6 +356,7 @@ impl DiskIO {
             for (sector, data) in writes {
                 self.write_sectors_sync(sector, &data)?;
             }
+            self.flush()?;
             Ok(())
         }
     }
@@ -385,6 +386,7 @@ impl DiskIO {
         for (sector, data) in writes {
             self.write_sectors_sync(sector, &data)?;
         }
+        self.flush()?;
         Ok(())
     }
 }
