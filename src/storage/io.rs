@@ -2,9 +2,9 @@ use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use io_uring::{opcode, types, IoUring, Probe};
 #[cfg(any(target_os = "linux", test))]
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::File;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, target_os = "windows", test))]
 use std::io;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
@@ -85,12 +85,13 @@ struct FileIdentity {
     inode: u64,
 }
 
+// Keep poisoned inodes alive so their identities cannot be reused before restart.
 #[cfg(any(target_os = "linux", test))]
-static INDETERMINATE_FILES: OnceLock<Mutex<HashSet<FileIdentity>>> = OnceLock::new();
+static INDETERMINATE_FILES: OnceLock<Mutex<HashMap<FileIdentity, Arc<File>>>> = OnceLock::new();
 
 #[cfg(any(target_os = "linux", test))]
-fn indeterminate_files() -> &'static Mutex<HashSet<FileIdentity>> {
-    INDETERMINATE_FILES.get_or_init(|| Mutex::new(HashSet::new()))
+fn indeterminate_files() -> &'static Mutex<HashMap<FileIdentity, Arc<File>>> {
+    INDETERMINATE_FILES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -98,15 +99,16 @@ fn file_is_indeterminate(identity: FileIdentity) -> bool {
     indeterminate_files()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains(&identity)
+        .contains_key(&identity)
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn mark_file_indeterminate(identity: FileIdentity) {
+fn mark_file_indeterminate(identity: FileIdentity, file: &Arc<File>) {
     indeterminate_files()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(identity);
+        .entry(identity)
+        .or_insert_with(|| Arc::clone(file));
 }
 
 #[cfg(target_os = "linux")]
@@ -571,7 +573,7 @@ impl DiskIO {
     pub(crate) fn poison_writes(&self, error: FeoxError) -> FeoxError {
         self.write_indeterminate.store(true, Ordering::Release);
         #[cfg(target_os = "linux")]
-        mark_file_indeterminate(self.file_identity);
+        mark_file_indeterminate(self.file_identity, &self._file);
         FeoxError::IndeterminateWrite(std::io::Error::other(error.to_string()))
     }
 
@@ -833,7 +835,7 @@ impl DiskIO {
 
                     let submit_error = FeoxError::IndeterminateWrite(error);
                     self.write_indeterminate.store(true, Ordering::Release);
-                    mark_file_indeterminate(self.file_identity);
+                    mark_file_indeterminate(self.file_identity, &self._file);
                     let ring = self.ring.as_mut().expect("io_uring checked above");
                     process_completions(
                         ring,

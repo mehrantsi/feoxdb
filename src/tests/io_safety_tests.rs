@@ -12,7 +12,7 @@ impl Drop for DropCounter {
 }
 
 #[test]
-fn registry_is_scoped_to_the_file_identity() {
+fn registry_scopes_and_pins_indeterminate_file_identity() {
     let marked = FileIdentity {
         device: u64::MAX,
         inode: u64::MAX,
@@ -21,12 +21,16 @@ fn registry_is_scoped_to_the_file_identity() {
         device: u64::MAX,
         inode: u64::MAX - 1,
     };
+    let file = Arc::new(tempfile::tempfile().unwrap());
+    let pinned = Arc::downgrade(&file);
 
     assert!(!file_is_indeterminate(marked));
     assert!(!file_is_indeterminate(other));
-    mark_file_indeterminate(marked);
+    mark_file_indeterminate(marked, &file);
+    drop(file);
     assert!(file_is_indeterminate(marked));
     assert!(!file_is_indeterminate(other));
+    assert!(pinned.upgrade().is_some());
 }
 
 #[test]
