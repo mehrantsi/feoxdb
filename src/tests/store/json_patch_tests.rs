@@ -1,6 +1,7 @@
 use crate::core::store::FeoxStore;
 use crate::error::FeoxError;
 use crate::test_hooks::{gate, AFTER_JSON_PATCH_READ};
+use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -53,8 +54,10 @@ fn json_patch_retries_against_the_current_generation() {
         .insert_with_timestamp(b"json", br#"{"a":0,"b":0}"#, Some(100))
         .unwrap();
 
+    let (start_tx, start_rx) = sync_channel(0);
     let patch_store = Arc::clone(&store);
     let patcher = thread::spawn(move || {
+        start_rx.recv().unwrap();
         patch_store.json_patch_with_timestamp(
             b"json",
             br#"[{"op":"replace","path":"/a","value":1}]"#,
@@ -62,6 +65,8 @@ fn json_patch_retries_against_the_current_generation() {
         )
     });
     let armed = session.arm_for_thread(AFTER_JSON_PATCH_READ, patcher.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
     assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
 
     store
@@ -82,8 +87,10 @@ fn newer_delete_wins_over_an_in_flight_json_patch() {
         .insert_with_timestamp(b"json", br#"{"a":0}"#, Some(100))
         .unwrap();
 
+    let (start_tx, start_rx) = sync_channel(0);
     let patch_store = Arc::clone(&store);
     let patcher = thread::spawn(move || {
+        start_rx.recv().unwrap();
         patch_store.json_patch_with_timestamp(
             b"json",
             br#"[{"op":"replace","path":"/a","value":1}]"#,
@@ -91,6 +98,8 @@ fn newer_delete_wins_over_an_in_flight_json_patch() {
         )
     });
     let armed = session.arm_for_thread(AFTER_JSON_PATCH_READ, patcher.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
     assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
 
     store.delete_with_timestamp(b"json", Some(200)).unwrap();
