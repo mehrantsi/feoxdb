@@ -1,5 +1,8 @@
 use crate::constants::*;
+use crate::storage::format::retirement_marker_token;
 use crate::storage::io::DiskIO;
+use crate::storage::metadata::Metadata;
+use bytes::Bytes;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
@@ -65,21 +68,39 @@ fn test_multiple_sector_read_write() {
 #[test]
 fn test_metadata_read_write() {
     let (disk_io, _temp) = create_test_disk_io();
+    let mut metadata = Metadata::new();
+    metadata.device_size = DEFAULT_DEVICE_SIZE;
+    metadata.update();
 
-    let metadata = vec![0xFE, 0x0B, 0xDB, 0x00]; // Example metadata
-    let padded_metadata = {
-        let mut data = metadata.clone();
-        data.resize(FEOX_METADATA_SIZE, 0);
-        data
-    };
+    disk_io.write_metadata(&metadata.encode()).unwrap();
 
-    // Write metadata
-    disk_io.write_metadata(&padded_metadata).unwrap();
-
-    // Read it back
     let read_metadata = disk_io.read_metadata().unwrap();
+    let loaded = Metadata::from_bytes(&read_metadata).unwrap();
+    assert_eq!(loaded.device_size, metadata.device_size);
+}
 
-    assert_eq!(read_metadata, padded_metadata);
+#[test]
+fn test_metadata_read_falls_back_to_previous_copy() {
+    let (disk_io, _temp) = create_test_disk_io();
+    let mut metadata = Metadata::new();
+    metadata.device_size = DEFAULT_DEVICE_SIZE;
+    metadata.update();
+    disk_io.initialize_store_metadata(&mut metadata).unwrap();
+    disk_io.flush().unwrap();
+
+    metadata.total_records = 1;
+    metadata.update();
+    disk_io.write_store_metadata(&mut metadata).unwrap();
+    assert_eq!(metadata.generation(), 2);
+
+    disk_io
+        .write_sectors_sync(FEOX_METADATA_BLOCK, &vec![0; FEOX_BLOCK_SIZE])
+        .unwrap();
+
+    let read_metadata = disk_io.read_metadata().unwrap();
+    let loaded = Metadata::from_bytes(&read_metadata).unwrap();
+    assert_eq!(loaded.generation(), 1);
+    assert_eq!(loaded.total_records, 0);
 }
 
 #[test]
@@ -104,6 +125,21 @@ fn test_batch_write() {
 }
 
 #[test]
+fn test_batch_write_shared_buffers() {
+    let (mut disk_io, _temp) = create_test_disk_io();
+    let batch = vec![
+        (300, Bytes::from(vec![0x31; FEOX_BLOCK_SIZE])),
+        (301, Bytes::from(vec![0x32; FEOX_BLOCK_SIZE])),
+    ];
+
+    disk_io.batch_write_bytes(&batch).unwrap();
+
+    for (sector, expected_data) in batch {
+        assert_eq!(disk_io.read_sectors_sync(sector, 1).unwrap(), expected_data);
+    }
+}
+
+#[test]
 fn test_flush() {
     let (disk_io, _temp) = create_test_disk_io();
 
@@ -112,6 +148,61 @@ fn test_flush() {
 
     // Flush should not panic
     disk_io.flush().unwrap();
+}
+
+#[test]
+fn test_retire_extents_marks_every_block() {
+    let (disk_io, _temp) = create_test_disk_io();
+    let extents = [(100, 3), (200, 1)];
+
+    disk_io.retire_extents(&extents).unwrap();
+
+    for &(sector, sectors) in &extents {
+        for offset in 0..sectors {
+            let block = disk_io
+                .read_sectors_sync(sector + offset as u64, 1)
+                .unwrap();
+            assert_eq!(&block[..8], DELETION_MARKER);
+            assert_eq!(
+                u64::from_le_bytes(block[8..16].try_into().unwrap()),
+                (sectors - offset) as u64
+            );
+            assert_eq!(
+                u16::from_le_bytes(block[16..18].try_into().unwrap()),
+                retirement_marker_token(sector + offset as u64, &block)
+            );
+            assert_eq!(block[18], RETIREMENT_COMPLETE);
+        }
+    }
+}
+
+#[test]
+fn test_retire_extent_streams_without_changing_marker_lengths() {
+    let (disk_io, _temp) = create_test_disk_io();
+    let sector = 1_000;
+    let sectors = 300;
+
+    disk_io
+        .write_sectors_sync(sector, &vec![0xA5; sectors * FEOX_BLOCK_SIZE])
+        .unwrap();
+    disk_io.retire_extents(&[(sector, sectors)]).unwrap();
+
+    for offset in [0, 255, 256, 299] {
+        let block = disk_io
+            .read_sectors_sync(sector + offset as u64, 1)
+            .unwrap();
+        assert_eq!(&block[..8], DELETION_MARKER);
+        assert_eq!(
+            u64::from_le_bytes(block[8..16].try_into().unwrap()),
+            (sectors - offset) as u64
+        );
+        assert_eq!(
+            u16::from_le_bytes(block[16..18].try_into().unwrap()),
+            retirement_marker_token(sector + offset as u64, &block)
+        );
+        assert_eq!(block[18], RETIREMENT_COMPLETE);
+        assert!(block[DELETION_MARKER_SIZE..].iter().all(|byte| *byte == 0));
+    }
 }
 
 #[test]

@@ -1,31 +1,88 @@
 use bytes::Bytes;
-use crossbeam_epoch::{Atomic, Guard, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::mem;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use crate::constants::*;
+
+const EXTENT_RETIRED: u32 = 1 << 31;
+const EXTENT_READERS: u32 = !EXTENT_RETIRED;
+
+/// The ordered index stores one slot per key rather than one node per record
+/// generation. An update swaps the slot's pointer under the hash bucket guard
+/// instead of removing and reinserting a skiplist node, so a key is never
+/// briefly absent from a range query, the two indexes cannot drift apart, and a
+/// range scan reads its values here rather than paying a hash lookup per key.
+#[derive(Debug)]
+pub(crate) struct TreeSlot {
+    record: Atomic<Arc<Record>>,
+}
+
+impl TreeSlot {
+    pub(crate) fn new(record: Arc<Record>) -> Self {
+        Self {
+            record: Atomic::new(record),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn load<'g>(&'g self, guard: &'g Guard) -> &'g Arc<Record> {
+        let record = self.record.load(Ordering::Acquire, guard);
+        debug_assert!(!record.is_null());
+        unsafe { record.deref() }
+    }
+
+    #[inline]
+    pub(crate) fn store(&self, record: Arc<Record>) {
+        let guard = &epoch::pin();
+        let previous = self
+            .record
+            .swap(Owned::new(record), Ordering::AcqRel, guard);
+        if !previous.is_null() {
+            unsafe {
+                guard.defer_destroy(previous);
+            }
+        }
+    }
+}
+
+impl Drop for TreeSlot {
+    fn drop(&mut self) {
+        let record = mem::replace(&mut self.record, Atomic::null());
+        unsafe {
+            drop(record.into_owned());
+        }
+    }
+}
+
+pub(crate) struct ExtentReadGuard<'a>(&'a AtomicU32);
+
+impl Drop for ExtentReadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct Record {
-    // Cache line 1 (64 bytes) - GET hot path
-    // These 3 fields are accessed together on EVERY GET operation
-    pub key: Vec<u8>,                              // 24 bytes
-    pub value: parking_lot::RwLock<Option<Bytes>>, // ~40 bytes (32 + Option overhead)
-
-    // Cache line 2 (64 bytes) - TTL and metadata
-    pub ttl_expiry: AtomicU64, // 8 bytes - checked on every GET
-    pub timestamp: u64,        // 8 bytes - checked on updates
-    pub value_len: usize,      // 8 bytes - used for size calcs
-    pub sector: AtomicU64,     // 8 bytes - for persistence
-    pub refcount: AtomicU32,   // 4 bytes - memory management
-    pub key_len: u16,          // 2 bytes - used with value_len
-    // Total so far: 40 bytes
-
-    // Still in cache line 2 or start of line 3 - cold fields
-    pub hash_link: AtomicLink,        // 8 bytes - only for hash ops
-    pub cache_ref_bit: AtomicU32,     // 4 bytes - rarely used
-    pub cache_access_time: AtomicU64, // 8 bytes - rarely used
+    pub key: Vec<u8>,
+    pub value: parking_lot::RwLock<Option<Bytes>>,
+    pub ttl_expiry: AtomicU64,
+    pub timestamp: u64,
+    pub value_len: usize,
+    pub sector: AtomicU64,
+    pub refcount: AtomicU32,
+    pub key_len: u16,
+    pub hash_link: AtomicLink,
+    pub cache_ref_bit: AtomicU32,
+    pub cache_access_time: AtomicU64,
+    pub(crate) retired_at: AtomicU64,
+    successor: OnceLock<Arc<Record>>,
+    value_source: Option<Weak<Record>>,
+    successor_safe: AtomicBool,
+    extent_state: AtomicU32,
 }
 
 // Custom atomic link for lock-free hash table
@@ -90,22 +147,22 @@ impl Record {
         let value_bytes = Bytes::from(value);
 
         Self {
-            // Cache line 1 - GET hot path
             key,
             value: parking_lot::RwLock::new(Some(value_bytes)),
-
-            // Cache line 2 - TTL and metadata
             ttl_expiry: AtomicU64::new(0),
             timestamp,
             value_len,
             sector: AtomicU64::new(0),
             refcount: AtomicU32::new(1),
             key_len,
-
-            // Cold fields
             hash_link: AtomicLink::new(),
             cache_ref_bit: AtomicU32::new(0),
             cache_access_time: AtomicU64::new(0),
+            retired_at: AtomicU64::new(0),
+            successor: OnceLock::new(),
+            value_source: None,
+            successor_safe: AtomicBool::new(false),
+            extent_state: AtomicU32::new(0),
         }
     }
 
@@ -130,22 +187,22 @@ impl Record {
         let value_len = value.len();
 
         Self {
-            // Cache line 1 - GET hot path
             key,
             value: parking_lot::RwLock::new(Some(value)),
-
-            // Cache line 2 - TTL and metadata
             ttl_expiry: AtomicU64::new(0),
             timestamp,
             value_len,
             sector: AtomicU64::new(0),
             refcount: AtomicU32::new(1),
             key_len,
-
-            // Cache line 3 - cold fields
             hash_link: AtomicLink::new(),
             cache_ref_bit: AtomicU32::new(0),
             cache_access_time: AtomicU64::new(0),
+            retired_at: AtomicU64::new(0),
+            successor: OnceLock::new(),
+            value_source: None,
+            successor_safe: AtomicBool::new(false),
+            extent_state: AtomicU32::new(0),
         }
     }
 
@@ -161,19 +218,46 @@ impl Record {
         record
     }
 
+    pub(crate) fn new_deferred_with_ttl(
+        predecessor: &Arc<Record>,
+        timestamp: u64,
+        ttl_expiry: u64,
+    ) -> Self {
+        let key = predecessor.key.clone();
+        let key_len = key.len() as u16;
+        Self {
+            key,
+            value: parking_lot::RwLock::new(None),
+            ttl_expiry: AtomicU64::new(ttl_expiry),
+            timestamp,
+            value_len: predecessor.value_len,
+            sector: AtomicU64::new(0),
+            refcount: AtomicU32::new(1),
+            key_len,
+            hash_link: AtomicLink::new(),
+            cache_ref_bit: AtomicU32::new(0),
+            cache_access_time: AtomicU64::new(0),
+            retired_at: AtomicU64::new(0),
+            successor: OnceLock::new(),
+            value_source: Some(Arc::downgrade(predecessor)),
+            successor_safe: AtomicBool::new(false),
+            extent_state: AtomicU32::new(0),
+        }
+    }
+
     pub fn calculate_size(&self) -> usize {
         mem::size_of::<Self>() + self.key.capacity() + self.value_len
     }
 
     pub fn calculate_disk_size(&self) -> usize {
-        let record_size = SECTOR_HEADER_SIZE +
-                         mem::size_of::<u16>() + // key_len
-                         self.key_len as usize +
-                         mem::size_of::<usize>() + // value_len
-                         mem::size_of::<u64>() + // timestamp
-                         self.value_len;
+        let record_size = SECTOR_HEADER_SIZE
+            + mem::size_of::<u16>()
+            + self.key.len()
+            + mem::size_of::<u64>()
+            + mem::size_of::<u64>()
+            + mem::size_of::<u64>()
+            + self.value_len;
 
-        // Round up to block size
         record_size.div_ceil(FEOX_BLOCK_SIZE) * FEOX_BLOCK_SIZE
     }
 
@@ -190,6 +274,10 @@ impl Record {
         std::sync::atomic::fence(Ordering::Release);
     }
 
+    pub(crate) fn value_source(&self) -> Option<Arc<Record>> {
+        self.value_source.as_ref().and_then(Weak::upgrade)
+    }
+
     pub fn inc_ref(&self) {
         self.refcount.fetch_add(1, Ordering::AcqRel);
     }
@@ -202,5 +290,111 @@ impl Record {
 
     pub fn ref_count(&self) -> u32 {
         self.refcount.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn link_successor(&self, successor: &Arc<Record>) {
+        let result = self.successor.set(Arc::clone(successor));
+        debug_assert!(result.is_ok());
+    }
+
+    pub(crate) fn retirement_timestamp(&self) -> u64 {
+        let mut retired_at = self.retired_at.load(Ordering::Acquire);
+        let Some(mut current) = self.successor.get().cloned() else {
+            return retired_at;
+        };
+
+        loop {
+            retired_at = retired_at.max(current.retired_at.load(Ordering::Acquire));
+            let Some(successor) = current.successor.get().cloned() else {
+                return retired_at;
+            };
+            current = successor;
+        }
+    }
+
+    pub(crate) fn successor_is_durable_or_deleted(&self) -> bool {
+        if self.successor_safe.load(Ordering::Acquire) {
+            return true;
+        }
+
+        let Some(mut current) = self.successor.get().cloned() else {
+            return true;
+        };
+        let mut path = Vec::new();
+
+        loop {
+            if current.sector.load(Ordering::Acquire) > 0
+                || current.successor_safe.load(Ordering::Acquire)
+            {
+                break;
+            }
+
+            let Some(successor) = current.successor.get().cloned() else {
+                if current.refcount.load(Ordering::Acquire) != 0 {
+                    return false;
+                }
+                match current.successor.get().cloned() {
+                    Some(successor) => {
+                        path.push(current);
+                        current = successor;
+                        continue;
+                    }
+                    None => break,
+                }
+            };
+
+            path.push(current);
+            current = successor;
+        }
+
+        self.successor_safe.store(true, Ordering::Release);
+        for record in path {
+            record.successor_safe.store(true, Ordering::Release);
+        }
+        true
+    }
+
+    pub(crate) fn acquire_extent(&self) -> Option<ExtentReadGuard<'_>> {
+        let mut state = self.extent_state.load(Ordering::Acquire);
+        loop {
+            if state & EXTENT_RETIRED != 0 {
+                return None;
+            }
+            debug_assert!(state & EXTENT_READERS != EXTENT_READERS);
+            match self.extent_state.compare_exchange_weak(
+                state,
+                state + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(ExtentReadGuard(&self.extent_state)),
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    pub(crate) fn retire_extent(&self) {
+        self.extent_state.fetch_or(EXTENT_RETIRED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn extent_has_readers(&self) -> bool {
+        self.extent_state.load(Ordering::Acquire) & EXTENT_READERS != 0
+    }
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        let mut successor = self.successor.take();
+        while let Some(record) = successor {
+            match Arc::try_unwrap(record) {
+                Ok(mut record) => {
+                    successor = record.successor.take();
+                }
+                Err(record) => {
+                    drop(record);
+                    break;
+                }
+            }
+        }
     }
 }

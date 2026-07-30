@@ -45,8 +45,7 @@ impl FreeSpaceManager {
     pub fn initialize(&mut self, device_size: u64) -> Result<()> {
         self.device_size = device_size;
 
-        // Reserve first 16 sectors for metadata (matching FEOX_DATA_START_BLOCK)
-        let metadata_sectors = 16;
+        let metadata_sectors = FEOX_DATA_START_BLOCK;
         let total_sectors = device_size / FEOX_BLOCK_SIZE as u64;
 
         if total_sectors <= metadata_sectors {
@@ -74,16 +73,11 @@ impl FreeSpaceManager {
             return Err(FeoxError::InvalidArgument);
         }
 
-        // Find best-fit (smallest space that fits)
-        let mut best_fit = None;
-
-        // Search from smallest size upward
-        for ((size, start), space) in &self.by_size {
-            if *size >= sectors_needed {
-                best_fit = Some((*size, *start, space.clone()));
-                break; // First fit is best fit since we're sorted by size
-            }
-        }
+        let best_fit = self
+            .by_size
+            .range((sectors_needed, 0)..)
+            .next()
+            .map(|((size, start), space)| (*size, *start, space.clone()));
 
         if let Some((size, start, space)) = best_fit {
             // Validate the space
@@ -94,6 +88,7 @@ impl FreeSpaceManager {
             // Remove from both trees
             self.by_size.remove(&(size, start));
             self.by_start.remove(&space.start);
+            self.total_free -= space.size * FEOX_BLOCK_SIZE as u64;
 
             let allocated_start = space.start;
 
@@ -112,7 +107,6 @@ impl FreeSpaceManager {
                 }
             }
 
-            self.total_free -= sectors_needed * FEOX_BLOCK_SIZE as u64;
             self.update_fragmentation();
 
             Ok(allocated_start)
@@ -123,7 +117,7 @@ impl FreeSpaceManager {
 
     /// Release sectors back to free space pool with coalescing
     pub fn release_sectors(&mut self, start: u64, count: u64) -> Result<()> {
-        if start == 0 || count == 0 {
+        if start < FEOX_DATA_START_BLOCK || count == 0 {
             return Err(FeoxError::InvalidArgument);
         }
 
@@ -145,20 +139,38 @@ impl FreeSpaceManager {
 
     /// Try to merge with adjacent free spaces
     fn try_merge_spaces(&mut self, start: u64, size: u64) -> Result<FreeSpace> {
-        let end = start + size;
-        let mut merged_start = start;
-        let mut merged_size = size;
+        let end = start.checked_add(size).ok_or(FeoxError::InvalidArgument)?;
 
-        // Find predecessor (space ending at our start)
-        let mut prev = None;
-        for (&s, space) in self.by_start.range(..start).rev().take(1) {
-            if s + space.size == start {
-                prev = Some(space.clone());
+        // Overlap is rejected from these two probes, before either neighbour is
+        // removed or debited, so a rejected release leaves the free list untouched.
+        // Checking after the merge would already have destroyed the neighbours.
+        let preceding = self
+            .by_start
+            .range(..start)
+            .next_back()
+            .map(|(_, space)| space.clone());
+        if let Some(ref space) = preceding {
+            if space.start + space.size > start {
+                return Err(FeoxError::DuplicateKey);
             }
         }
 
-        // Find successor (space starting at our end)
-        let next = self.by_start.get(&end).cloned();
+        let following = self
+            .by_start
+            .range(start..=end)
+            .next()
+            .map(|(_, space)| space.clone());
+        if let Some(ref space) = following {
+            if space.start < end {
+                return Err(FeoxError::DuplicateKey);
+            }
+        }
+
+        let mut merged_start = start;
+        let mut merged_size = size;
+
+        let prev = preceding.filter(|space| space.start + space.size == start);
+        let next = following.filter(|space| space.start == end);
 
         // Merge with predecessor if found
         if let Some(prev_space) = prev {
@@ -220,8 +232,7 @@ impl FreeSpaceManager {
 
     /// Check if a free space is valid
     fn is_valid_free_space(&self, space: &FreeSpace) -> bool {
-        // Never allow sector 0 (reserved for metadata)
-        if space.start == 0 {
+        if space.start < FEOX_DATA_START_BLOCK {
             return false;
         }
 
@@ -229,6 +240,9 @@ impl FreeSpaceManager {
         if self.device_size > 0 {
             let device_sectors = self.device_size / FEOX_BLOCK_SIZE as u64;
             if space.start >= device_sectors {
+                return false;
+            }
+            if space.start.checked_add(space.size).is_none() {
                 return false;
             }
             if space.start + space.size > device_sectors {
@@ -241,7 +255,7 @@ impl FreeSpaceManager {
 
     /// Check if a sector range is valid
     fn is_valid_sector_range(&self, start: u64, count: u64) -> bool {
-        if start == 0 || count == 0 {
+        if start < FEOX_DATA_START_BLOCK || count == 0 {
             return false;
         }
 
@@ -250,8 +264,9 @@ impl FreeSpaceManager {
             if start >= device_sectors {
                 return false;
             }
-            if start + count > device_sectors {
-                return false;
+            match start.checked_add(count) {
+                Some(end) if end <= device_sectors => {}
+                _ => return false,
             }
         }
 

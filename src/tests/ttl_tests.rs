@@ -1,8 +1,96 @@
 use crate::core::store::FeoxStore;
 use crate::error::FeoxError;
+use crate::storage::metadata::Metadata;
 use bytes::Bytes;
+use std::collections::HashSet;
+use std::io::{Seek, SeekFrom, Write};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+use tempfile::NamedTempFile;
+
+const TTL_TEST_DEVICE_SIZE: u64 = 2 * 1024 * 1024;
+
+#[test]
+fn update_ttl_advances_conflict_versions_in_all_modes() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let memory = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    let persistent = FeoxStore::builder()
+        .device_path(temp_file.path().to_string_lossy().into_owned())
+        .file_size(TTL_TEST_DEVICE_SIZE)
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+
+    for store in [&memory, &persistent] {
+        let timestamp = store.get_timestamp_pub();
+        store
+            .insert_with_ttl_and_timestamp(b"key", b"value", 60, Some(timestamp))
+            .unwrap();
+        store.update_ttl(b"key", 120).unwrap();
+        assert!(matches!(
+            store.insert_with_timestamp(b"key", b"stale", Some(timestamp.checked_add(1).unwrap())),
+            Err(FeoxError::OlderTimestamp)
+        ));
+    }
+}
+
+#[test]
+fn update_ttl_does_not_resurrect_expired_key() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    let key = b"expired";
+
+    store
+        .insert_with_ttl_and_timestamp(key, b"value", 1, Some(1))
+        .unwrap();
+
+    assert!(matches!(
+        store.update_ttl(key, 60),
+        Err(FeoxError::KeyNotFound)
+    ));
+    assert!(matches!(store.persist(key), Err(FeoxError::KeyNotFound)));
+    assert!(matches!(store.get(key), Err(FeoxError::KeyNotFound)));
+}
+
+#[test]
+fn test_legacy_v1_rejects_ttl_mutations() {
+    let temp_file = NamedTempFile::new().unwrap();
+    temp_file.as_file().set_len(TTL_TEST_DEVICE_SIZE).unwrap();
+
+    let mut metadata = Metadata::new();
+    metadata.version = 1;
+    metadata.device_size = TTL_TEST_DEVICE_SIZE;
+    metadata.update();
+
+    let mut file = temp_file.reopen().unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&metadata.encode()).unwrap();
+    file.sync_all().unwrap();
+
+    let store = FeoxStore::builder()
+        .device_path(temp_file.path().to_string_lossy().into_owned())
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+    store.insert(b"existing", b"value").unwrap();
+    store.flush().unwrap();
+
+    let update_result = store.update_ttl(b"existing", 60);
+    assert!(
+        matches!(update_result, Err(FeoxError::Unsupported)),
+        "{update_result:?}"
+    );
+    assert!(matches!(
+        store.persist(b"existing"),
+        Err(FeoxError::Unsupported)
+    ));
+    assert!(matches!(
+        store.insert_with_ttl(b"new", b"value", 60),
+        Err(FeoxError::Unsupported)
+    ));
+    assert_eq!(store.get(b"existing").unwrap(), b"value");
+}
 
 #[test]
 fn test_insert_with_ttl() {
@@ -74,6 +162,283 @@ fn test_ttl_preserves_value() {
 
     let value = store.get(b"key1").unwrap();
     assert_eq!(value, b"original_value");
+}
+
+#[test]
+fn test_update_ttl_is_durable_after_value_offload() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+    let persisted_expiry;
+
+    {
+        let store = FeoxStore::builder()
+            .device_path(path.clone())
+            .file_size(TTL_TEST_DEVICE_SIZE)
+            .enable_ttl(true)
+            .build()
+            .unwrap();
+        store.insert(b"renewed", b"value").unwrap();
+        store.flush().unwrap();
+
+        let flushed = store
+            .get_hash_table()
+            .read(b"renewed".as_slice(), |_, record| Arc::clone(record))
+            .unwrap();
+        assert!(flushed.get_value().is_none());
+
+        store.update_ttl(b"renewed", 60).unwrap();
+        store.flush().unwrap();
+        persisted_expiry = store
+            .get_hash_table()
+            .read(b"renewed".as_slice(), |_, record| {
+                record.ttl_expiry.load(Ordering::Acquire)
+            })
+            .unwrap();
+        assert_ne!(persisted_expiry, 0);
+    }
+
+    let reopened = FeoxStore::builder()
+        .device_path(path)
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+    assert_eq!(reopened.get(b"renewed").unwrap(), b"value");
+    let recovered_expiry = reopened
+        .get_hash_table()
+        .read(b"renewed".as_slice(), |_, record| {
+            record.ttl_expiry.load(Ordering::Acquire)
+        })
+        .unwrap();
+    assert_eq!(recovered_expiry, persisted_expiry);
+}
+
+#[test]
+fn update_ttl_defers_offloaded_value_read() {
+    let _session = crate::test_hooks::gate::session();
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+    let store = FeoxStore::builder()
+        .device_path(path)
+        .file_size(TTL_TEST_DEVICE_SIZE)
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+    let value = vec![b'x'; 64 * 1024];
+
+    store.insert(b"renewed", &value).unwrap();
+    store.flush().unwrap();
+
+    let gate = _session.arm_for_thread(
+        crate::test_hooks::AFTER_SECTOR_LOAD,
+        thread::current().id(),
+        0,
+    );
+    store.update_ttl(b"renewed", 60).unwrap();
+    assert_eq!(gate.arrivals(), 0);
+
+    store.update_ttl(b"renewed", 120).unwrap();
+    assert_eq!(gate.arrivals(), 0);
+    store.flush().unwrap();
+    assert_eq!(store.get(b"renewed").unwrap(), value);
+}
+
+#[test]
+fn deferred_ttl_source_tracks_the_generation_flushed_concurrently() {
+    let session = crate::test_hooks::gate::session();
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+    let store = Arc::new(
+        FeoxStore::builder()
+            .device_path(path.clone())
+            .file_size(TTL_TEST_DEVICE_SIZE)
+            .enable_caching(false)
+            .enable_ttl(true)
+            .build()
+            .unwrap(),
+    );
+    let value = vec![b'x'; 64 * 1024];
+
+    store.insert(b"renewed", &value).unwrap();
+    store.flush().unwrap();
+    store.update_ttl(b"renewed", 60).unwrap();
+
+    let predecessor = store
+        .get_hash_table()
+        .read(b"renewed".as_slice(), |_, record| Arc::clone(record))
+        .unwrap();
+    assert_eq!(predecessor.sector.load(Ordering::Acquire), 0);
+
+    let gate = Arc::new(session.arm_for_thread(
+        crate::test_hooks::AFTER_TTL_DEFERRED_SOURCE,
+        thread::current().id(),
+        1,
+    ));
+    let flush_store = Arc::clone(&store);
+    let flush_gate = Arc::clone(&gate);
+    let flush = thread::spawn(move || {
+        assert!(flush_gate.wait_for_arrivals(1, Duration::from_secs(5)));
+        let result = flush_store.flush();
+        assert!(flush_gate.release_and_drain(Duration::from_secs(5)));
+        result
+    });
+
+    store.update_ttl(b"renewed", 120).unwrap();
+    flush.join().unwrap().unwrap();
+    assert_ne!(predecessor.sector.load(Ordering::Acquire), 0);
+
+    store.flush().unwrap();
+    assert_eq!(store.get(b"renewed").unwrap(), value);
+
+    drop(predecessor);
+    drop(store);
+    let reopened = FeoxStore::builder()
+        .device_path(path)
+        .enable_caching(false)
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+    assert_eq!(reopened.get(b"renewed").unwrap(), value);
+}
+
+#[test]
+fn test_persist_is_durable_after_value_offload() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+
+    {
+        let store = FeoxStore::builder()
+            .device_path(path.clone())
+            .file_size(TTL_TEST_DEVICE_SIZE)
+            .enable_ttl(true)
+            .build()
+            .unwrap();
+        store.insert_with_ttl(b"persistent", b"value", 60).unwrap();
+        store.flush().unwrap();
+
+        let flushed = store
+            .get_hash_table()
+            .read(b"persistent".as_slice(), |_, record| Arc::clone(record))
+            .unwrap();
+        assert!(flushed.get_value().is_none());
+
+        store.persist(b"persistent").unwrap();
+        store.flush().unwrap();
+    }
+
+    let reopened = FeoxStore::builder()
+        .device_path(path)
+        .enable_ttl(true)
+        .build()
+        .unwrap();
+    assert_eq!(reopened.get(b"persistent").unwrap(), b"value");
+    assert_eq!(reopened.get_ttl(b"persistent").unwrap(), None);
+}
+
+#[test]
+fn test_active_sweeper_removes_expired_record_after_renewal_is_rejected() {
+    let _session = crate::test_hooks::gate::session();
+    let store = Arc::new(FeoxStore::builder().enable_ttl(true).build().unwrap());
+    store
+        .insert_with_ttl_and_timestamp(b"sweeper-renew", b"old", 1, Some(1))
+        .unwrap();
+
+    let start = Arc::new(Barrier::new(2));
+    let sweeper_store = Arc::clone(&store);
+    let sweeper_start = Arc::clone(&start);
+    let sweeper = thread::spawn(move || {
+        sweeper_start.wait();
+        crate::core::ttl_sweep::sample_and_expire_for_test(&sweeper_store)
+    });
+    let gate = _session.arm_for_thread(
+        crate::test_hooks::TTL_AFTER_EXPIRED_SAMPLE,
+        sweeper.thread().id(),
+        1,
+    );
+
+    start.wait();
+    assert!(gate.wait_for_arrivals(1, Duration::from_secs(5)));
+    assert!(matches!(
+        store.update_ttl(b"sweeper-renew", 60),
+        Err(FeoxError::KeyNotFound)
+    ));
+    assert!(gate.release_and_drain(Duration::from_secs(5)));
+
+    assert_eq!(sweeper.join().unwrap().1, 1);
+    assert!(matches!(
+        store.get(b"sweeper-renew"),
+        Err(FeoxError::KeyNotFound)
+    ));
+}
+
+#[test]
+fn test_active_sweeper_does_not_delete_replacement_record() {
+    let _session = crate::test_hooks::gate::session();
+    let store = Arc::new(FeoxStore::builder().enable_ttl(true).build().unwrap());
+    store
+        .insert_with_ttl_and_timestamp(b"sweeper-replace", b"old", 1, Some(1))
+        .unwrap();
+
+    let start = Arc::new(Barrier::new(2));
+    let sweeper_store = Arc::clone(&store);
+    let sweeper_start = Arc::clone(&start);
+    let sweeper = thread::spawn(move || {
+        sweeper_start.wait();
+        crate::core::ttl_sweep::sample_and_expire_for_test(&sweeper_store)
+    });
+    let gate = _session.arm_for_thread(
+        crate::test_hooks::TTL_AFTER_EXPIRED_SAMPLE,
+        sweeper.thread().id(),
+        1,
+    );
+
+    start.wait();
+    assert!(gate.wait_for_arrivals(1, Duration::from_secs(5)));
+    store.insert(b"sweeper-replace", b"new").unwrap();
+    assert!(gate.release_and_drain(Duration::from_secs(5)));
+
+    assert_eq!(sweeper.join().unwrap().1, 0);
+    assert_eq!(store.get(b"sweeper-replace").unwrap(), b"new");
+    assert_eq!(store.get_ttl(b"sweeper-replace").unwrap(), None);
+}
+
+#[test]
+fn test_active_sweeper_allows_recreation() {
+    let store = Arc::new(FeoxStore::builder().enable_ttl(true).build().unwrap());
+    store
+        .insert_with_ttl_and_timestamp(b"sweeper-delete", b"old", 1, Some(1))
+        .unwrap();
+
+    assert_eq!(
+        crate::core::ttl_sweep::sample_and_expire_for_test(&store).1,
+        1
+    );
+    store
+        .insert_with_timestamp(b"sweeper-delete", b"newer", Some(2))
+        .unwrap();
+    assert_eq!(store.get(b"sweeper-delete").unwrap(), b"newer");
+}
+
+#[test]
+fn ttl_sampler_is_bounded_and_filters_non_ttl_records() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    for index in 0..32 {
+        let key = format!("ttl-{index}");
+        store.insert_with_ttl(key.as_bytes(), b"value", 60).unwrap();
+    }
+    for index in 0..32 {
+        let key = format!("plain-{index}");
+        store.insert(key.as_bytes(), b"value").unwrap();
+    }
+
+    let sample = crate::core::ttl_sweep::sample_ttl_keys_for_test(&store, 7);
+    assert_eq!(sample.len(), 7);
+    assert_eq!(sample.iter().collect::<HashSet<_>>().len(), 7);
+    assert!(sample.iter().all(|key| key.starts_with(b"ttl-")));
+
+    let all = crate::core::ttl_sweep::sample_ttl_keys_for_test(&store, usize::MAX);
+    assert_eq!(all.len(), 32);
+    assert_eq!(all.iter().collect::<HashSet<_>>().len(), 32);
+    assert!(crate::core::ttl_sweep::sample_ttl_keys_for_test(&store, 0).is_empty());
 }
 
 #[test]

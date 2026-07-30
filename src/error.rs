@@ -24,7 +24,7 @@ pub enum FeoxError {
     #[error("Out of memory")]
     OutOfMemory,
 
-    #[error("Timestamp is older than existing record")]
+    #[error("Timestamp is not newer than existing record")]
     OlderTimestamp,
 
     #[error("Invalid numeric value")]
@@ -48,8 +48,16 @@ pub enum FeoxError {
     #[error("Corrupted record")]
     CorruptedRecord,
 
+    #[error(
+        "Ambiguous v1/v2 deletion marker; reopen with allow_ambiguous_legacy_recovery(true) only for trusted migration"
+    )]
+    AmbiguousLegacyTombstone,
+
     #[error("Invalid record")]
     InvalidRecord,
+
+    #[error("Extent no longer belongs to this record")]
+    StaleExtent,
 
     #[error("Invalid device")]
     InvalidDevice,
@@ -59,6 +67,9 @@ pub enum FeoxError {
 
     #[error("IO error: {0}")]
     IoError(#[from] io::Error),
+
+    #[error("Indeterminate write: {0}")]
+    IndeterminateWrite(io::Error),
 
     #[error("System error: {0}")]
     SystemError(i32),
@@ -141,10 +152,12 @@ impl FeoxError {
             FeoxError::InvalidRange => crate::constants::EINVAL,
             FeoxError::MultiTenantDisabled => crate::constants::ENODEV,
             FeoxError::NoDevice => crate::constants::ENODEV,
-            FeoxError::InvalidMetadata | FeoxError::CorruptedRecord => crate::constants::EIO,
-            FeoxError::IoError(_) => crate::constants::EIO,
+            FeoxError::InvalidMetadata
+            | FeoxError::CorruptedRecord
+            | FeoxError::AmbiguousLegacyTombstone => crate::constants::EIO,
+            FeoxError::IoError(_) | FeoxError::IndeterminateWrite(_) => crate::constants::EIO,
             FeoxError::SystemError(e) => *e,
-            FeoxError::Timeout => crate::constants::EAGAIN,
+            FeoxError::Timeout | FeoxError::StaleExtent => crate::constants::EAGAIN,
             FeoxError::SizeMismatch { .. } => crate::constants::EMSGSIZE,
             _ => crate::constants::EIO,
         }

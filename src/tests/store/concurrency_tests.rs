@@ -1,6 +1,10 @@
 use crate::core::store::FeoxStore;
+use crate::error::FeoxError;
+use crate::test_hooks::{gate, AFTER_UPSERT_READ};
+use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn test_concurrent_inserts() {
@@ -104,4 +108,119 @@ fn test_concurrent_atomic_increments() {
     // Should have exactly 1000 increments
     let final_value = store.atomic_increment(key, 0).unwrap();
     assert_eq!(final_value, 1000);
+}
+
+#[test]
+fn newer_delete_wins_over_in_flight_upsert() {
+    let session = gate::session();
+    let store = Arc::new(FeoxStore::new(None).unwrap());
+    store
+        .insert_with_timestamp(b"key", b"old", Some(100))
+        .unwrap();
+
+    let (start_tx, start_rx) = sync_channel(0);
+    let writer_store = Arc::clone(&store);
+    let writer = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        writer_store.insert_with_timestamp(b"key", b"stale", Some(150))
+    });
+    let armed = session.arm_for_thread(AFTER_UPSERT_READ, writer.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
+    assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
+    store.delete_with_timestamp(b"key", Some(200)).unwrap();
+    armed.release();
+
+    assert!(matches!(
+        writer.join().unwrap(),
+        Err(FeoxError::OlderTimestamp)
+    ));
+    assert!(!store.contains_key(b"key"));
+}
+
+#[test]
+fn newer_delete_wins_across_an_intermediate_generation() {
+    let session = gate::session();
+    let store = Arc::new(FeoxStore::new(None).unwrap());
+    store
+        .insert_with_timestamp(b"key", b"old", Some(100))
+        .unwrap();
+
+    let (start_tx, start_rx) = sync_channel(0);
+    let writer_store = Arc::clone(&store);
+    let writer = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        writer_store.insert_with_timestamp(b"key", b"stale", Some(150))
+    });
+    let armed = session.arm_for_thread(AFTER_UPSERT_READ, writer.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
+    assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
+    store
+        .insert_with_timestamp(b"key", b"intermediate", Some(160))
+        .unwrap();
+    store.delete_with_timestamp(b"key", Some(200)).unwrap();
+    armed.release();
+
+    assert!(matches!(
+        writer.join().unwrap(),
+        Err(FeoxError::OlderTimestamp)
+    ));
+    assert!(!store.contains_key(b"key"));
+}
+
+#[test]
+fn newer_delete_wins_after_a_fresh_recreation() {
+    let session = gate::session();
+    let store = Arc::new(FeoxStore::new(None).unwrap());
+    store
+        .insert_with_timestamp(b"key", b"old", Some(100))
+        .unwrap();
+
+    let (start_tx, start_rx) = sync_channel(0);
+    let writer_store = Arc::clone(&store);
+    let writer = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        writer_store.insert_with_timestamp(b"key", b"stale", Some(150))
+    });
+    let armed = session.arm_for_thread(AFTER_UPSERT_READ, writer.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
+    assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
+    store.delete_with_timestamp(b"key", Some(200)).unwrap();
+    store
+        .insert_with_timestamp(b"key", b"fresh", Some(50))
+        .unwrap();
+    armed.release();
+
+    assert!(matches!(
+        writer.join().unwrap(),
+        Err(FeoxError::OlderTimestamp)
+    ));
+    assert_eq!(store.get(b"key").unwrap(), b"fresh");
+}
+
+#[test]
+fn newer_in_flight_upsert_recreates_after_delete() {
+    let session = gate::session();
+    let store = Arc::new(FeoxStore::new(None).unwrap());
+    store
+        .insert_with_timestamp(b"key", b"old", Some(100))
+        .unwrap();
+
+    let (start_tx, start_rx) = sync_channel(0);
+    let writer_store = Arc::clone(&store);
+    let writer = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        writer_store.insert_with_timestamp(b"key", b"new", Some(300))
+    });
+    let armed = session.arm_for_thread(AFTER_UPSERT_READ, writer.thread().id(), 1);
+
+    start_tx.send(()).unwrap();
+    assert!(armed.wait_for_arrivals(1, Duration::from_secs(5)));
+    store.delete_with_timestamp(b"key", Some(200)).unwrap();
+    armed.release();
+
+    assert!(writer.join().unwrap().unwrap());
+    assert_eq!(store.get(b"key").unwrap(), b"new");
 }

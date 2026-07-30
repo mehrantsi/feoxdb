@@ -30,6 +30,8 @@ pub struct Statistics {
     pub writes_buffered: AtomicU64,
     pub writes_flushed: AtomicU64,
     pub write_failures: AtomicU64,
+    pub sector_release_failures: AtomicU64,
+    pub write_entries_stuck: AtomicU64,
     pub flush_count: AtomicU64,
 
     // Disk I/O metrics
@@ -80,6 +82,8 @@ impl Statistics {
             writes_buffered: AtomicU64::new(0),
             writes_flushed: AtomicU64::new(0),
             write_failures: AtomicU64::new(0),
+            sector_release_failures: AtomicU64::new(0),
+            write_entries_stuck: AtomicU64::new(0),
             flush_count: AtomicU64::new(0),
 
             // Disk I/O metrics
@@ -143,7 +147,11 @@ impl Statistics {
 
     /// Record write buffer operation
     pub fn record_write_buffered(&self) {
-        self.writes_buffered.fetch_add(1, Ordering::Relaxed);
+        self.record_writes_buffered(1);
+    }
+
+    pub(crate) fn record_writes_buffered(&self, count: u64) {
+        self.writes_buffered.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn record_write_flushed(&self, count: u64) {
@@ -152,6 +160,14 @@ impl Statistics {
 
     pub fn record_write_failed(&self) {
         self.write_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_write_entry_stuck(&self) {
+        self.write_entries_stuck.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_sector_release_failure(&self) {
+        self.sector_release_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record disk I/O
@@ -175,7 +191,7 @@ impl Statistics {
             FeoxError::OutOfMemory => {
                 self.out_of_memory_errors.fetch_add(1, Ordering::Relaxed);
             }
-            FeoxError::IoError(_) => {
+            FeoxError::IoError(_) | FeoxError::IndeterminateWrite(_) => {
                 self.io_errors.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -184,63 +200,58 @@ impl Statistics {
 
     /// Get a snapshot of current statistics
     pub fn snapshot(&self) -> StatsSnapshot {
-        let total_ops = self.total_gets.load(Ordering::Relaxed)
-            + self.total_inserts.load(Ordering::Relaxed)
-            + self.total_updates.load(Ordering::Relaxed)
-            + self.total_deletes.load(Ordering::Relaxed);
-
-        let avg_get_latency = if self.total_gets.load(Ordering::Relaxed) > 0 {
-            self.get_latency_ns.load(Ordering::Relaxed) / self.total_gets.load(Ordering::Relaxed)
-        } else {
-            0
-        };
-
-        let avg_insert_latency = {
-            let inserts = self.total_inserts.load(Ordering::Relaxed)
-                + self.total_updates.load(Ordering::Relaxed);
-            self.insert_latency_ns
-                .load(Ordering::Relaxed)
-                .checked_div(inserts)
-                .unwrap_or(0)
-        };
-
-        let avg_delete_latency = if self.total_deletes.load(Ordering::Relaxed) > 0 {
-            self.delete_latency_ns.load(Ordering::Relaxed)
-                / self.total_deletes.load(Ordering::Relaxed)
-        } else {
-            0
-        };
-
-        let cache_hit_rate = {
-            let total_cache_ops =
-                self.cache_hits.load(Ordering::Relaxed) + self.cache_misses.load(Ordering::Relaxed);
-            if total_cache_ops > 0 {
-                (self.cache_hits.load(Ordering::Relaxed) as f64 / total_cache_ops as f64) * 100.0
-            } else {
-                0.0
-            }
+        let total_gets = self.total_gets.load(Ordering::Relaxed);
+        let total_inserts = self.total_inserts.load(Ordering::Relaxed);
+        let total_updates = self.total_updates.load(Ordering::Relaxed);
+        let total_deletes = self.total_deletes.load(Ordering::Relaxed);
+        let cache_hits = self.cache_hits.load(Ordering::Relaxed);
+        let cache_misses = self.cache_misses.load(Ordering::Relaxed);
+        let total_ops = total_gets
+            .saturating_add(total_inserts)
+            .saturating_add(total_updates)
+            .saturating_add(total_deletes);
+        let avg_get_latency = self
+            .get_latency_ns
+            .load(Ordering::Relaxed)
+            .checked_div(total_gets)
+            .unwrap_or(0);
+        let avg_insert_latency = self
+            .insert_latency_ns
+            .load(Ordering::Relaxed)
+            .checked_div(total_inserts.saturating_add(total_updates))
+            .unwrap_or(0);
+        let avg_delete_latency = self
+            .delete_latency_ns
+            .load(Ordering::Relaxed)
+            .checked_div(total_deletes)
+            .unwrap_or(0);
+        let cache_hit_rate = match cache_hits.saturating_add(cache_misses) {
+            0 => 0.0,
+            total => (cache_hits as f64 / total as f64) * 100.0,
         };
 
         StatsSnapshot {
             record_count: self.record_count.load(Ordering::Relaxed),
             memory_usage: self.memory_usage.load(Ordering::Relaxed),
             total_operations: total_ops,
-            total_gets: self.total_gets.load(Ordering::Relaxed),
-            total_inserts: self.total_inserts.load(Ordering::Relaxed),
-            total_updates: self.total_updates.load(Ordering::Relaxed),
-            total_deletes: self.total_deletes.load(Ordering::Relaxed),
+            total_gets,
+            total_inserts,
+            total_updates,
+            total_deletes,
             total_range_queries: self.total_range_queries.load(Ordering::Relaxed),
             avg_get_latency_ns: avg_get_latency,
             avg_insert_latency_ns: avg_insert_latency,
             avg_delete_latency_ns: avg_delete_latency,
-            cache_hits: self.cache_hits.load(Ordering::Relaxed),
-            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            cache_hits,
+            cache_misses,
             cache_hit_rate,
             cache_evictions: self.cache_evictions.load(Ordering::Relaxed),
             cache_memory: self.cache_memory.load(Ordering::Relaxed),
             writes_buffered: self.writes_buffered.load(Ordering::Relaxed),
             writes_flushed: self.writes_flushed.load(Ordering::Relaxed),
             write_failures: self.write_failures.load(Ordering::Relaxed),
+            sector_release_failures: self.sector_release_failures.load(Ordering::Relaxed),
+            write_entries_stuck: self.write_entries_stuck.load(Ordering::Relaxed),
             flush_count: self.flush_count.load(Ordering::Relaxed),
             disk_reads: self.disk_reads.load(Ordering::Relaxed),
             disk_writes: self.disk_writes.load(Ordering::Relaxed),
@@ -249,6 +260,10 @@ impl Statistics {
             key_not_found_errors: self.key_not_found_errors.load(Ordering::Relaxed),
             out_of_memory_errors: self.out_of_memory_errors.load(Ordering::Relaxed),
             io_errors: self.io_errors.load(Ordering::Relaxed),
+            ttl_expired_lazy: self.ttl_expired_lazy.load(Ordering::Relaxed),
+            ttl_expired_active: self.ttl_expired_active.load(Ordering::Relaxed),
+            ttl_cleaner_runs: self.ttl_cleaner_runs.load(Ordering::Relaxed),
+            keys_with_ttl: self.keys_with_ttl.load(Ordering::Relaxed),
         }
     }
 
@@ -268,6 +283,8 @@ impl Statistics {
         self.writes_buffered.store(0, Ordering::Relaxed);
         self.writes_flushed.store(0, Ordering::Relaxed);
         self.write_failures.store(0, Ordering::Relaxed);
+        self.sector_release_failures.store(0, Ordering::Relaxed);
+        self.write_entries_stuck.store(0, Ordering::Relaxed);
         self.flush_count.store(0, Ordering::Relaxed);
         self.disk_reads.store(0, Ordering::Relaxed);
         self.disk_writes.store(0, Ordering::Relaxed);
@@ -276,6 +293,9 @@ impl Statistics {
         self.key_not_found_errors.store(0, Ordering::Relaxed);
         self.out_of_memory_errors.store(0, Ordering::Relaxed);
         self.io_errors.store(0, Ordering::Relaxed);
+        self.ttl_expired_lazy.store(0, Ordering::Relaxed);
+        self.ttl_expired_active.store(0, Ordering::Relaxed);
+        self.ttl_cleaner_runs.store(0, Ordering::Relaxed);
     }
 }
 
@@ -316,6 +336,8 @@ pub struct StatsSnapshot {
     pub writes_buffered: u64,
     pub writes_flushed: u64,
     pub write_failures: u64,
+    pub sector_release_failures: u64,
+    pub write_entries_stuck: u64,
     pub flush_count: u64,
 
     // Disk I/O
@@ -328,6 +350,12 @@ pub struct StatsSnapshot {
     pub key_not_found_errors: u64,
     pub out_of_memory_errors: u64,
     pub io_errors: u64,
+
+    // TTL
+    pub ttl_expired_lazy: u64,
+    pub ttl_expired_active: u64,
+    pub ttl_cleaner_runs: u64,
+    pub keys_with_ttl: u64,
 }
 
 impl StatsSnapshot {

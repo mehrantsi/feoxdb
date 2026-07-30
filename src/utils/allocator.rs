@@ -21,7 +21,7 @@ impl FeoxAllocator {
             Self::allocate_large(size)?
         };
 
-        TOTAL_ALLOCATED.fetch_add(size, Ordering::AcqRel);
+        TOTAL_ALLOCATED.fetch_add(size, Ordering::Relaxed);
         Ok(ptr)
     }
 
@@ -34,7 +34,7 @@ impl FeoxAllocator {
             if result != 0 {
                 return Err(FeoxError::AllocationFailed);
             }
-            TOTAL_ALLOCATED.fetch_add(size, Ordering::AcqRel);
+            TOTAL_ALLOCATED.fetch_add(size, Ordering::Relaxed);
             NonNull::new(ptr as *mut u8).ok_or(FeoxError::AllocationFailed)
         }
 
@@ -45,7 +45,7 @@ impl FeoxAllocator {
                 .map_err(|_| FeoxError::AllocationFailed)?;
             unsafe {
                 let ptr = alloc(layout);
-                TOTAL_ALLOCATED.fetch_add(size, Ordering::AcqRel);
+                TOTAL_ALLOCATED.fetch_add(size, Ordering::Relaxed);
                 NonNull::new(ptr).ok_or(FeoxError::AllocationFailed)
             }
         }
@@ -58,7 +58,7 @@ impl FeoxAllocator {
             Self::deallocate_large(ptr, size);
         }
 
-        TOTAL_ALLOCATED.fetch_sub(size, Ordering::AcqRel);
+        TOTAL_ALLOCATED.fetch_sub(size, Ordering::Relaxed);
     }
 
     /// Deallocate aligned memory
@@ -80,7 +80,7 @@ impl FeoxAllocator {
             }
         }
 
-        TOTAL_ALLOCATED.fetch_sub(size, Ordering::AcqRel);
+        TOTAL_ALLOCATED.fetch_sub(size, Ordering::Relaxed);
     }
 
     fn allocate_small(size: usize) -> Result<NonNull<u8>> {
@@ -149,7 +149,7 @@ impl FeoxAllocator {
     }
 
     pub fn get_allocated() -> usize {
-        TOTAL_ALLOCATED.load(Ordering::Acquire)
+        TOTAL_ALLOCATED.load(Ordering::Relaxed)
     }
 }
 

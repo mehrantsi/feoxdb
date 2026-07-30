@@ -3,10 +3,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::core::record::Record;
 use crate::core::ttl_sweep::TtlConfig;
 use crate::error::{FeoxError, Result};
 
 use super::FeoxStore;
+
+enum TtlReplacementValue {
+    Resident(Bytes),
+    Deferred(Arc<Record>),
+}
 
 impl FeoxStore {
     /// Insert or update a key-value pair with TTL (Time-To-Live).
@@ -66,19 +72,8 @@ impl FeoxStore {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
-        let timestamp = match timestamp {
-            Some(0) | None => self.get_timestamp(),
-            Some(ts) => ts,
-        };
-
-        // Calculate expiry timestamp
-        let ttl_expiry = if ttl_seconds > 0 {
-            timestamp + (ttl_seconds * 1_000_000_000) // Convert seconds to nanoseconds
-        } else {
-            0
-        };
-
-        self.insert_with_timestamp_and_ttl_internal(key, value, Some(timestamp), ttl_expiry)
+        self.ensure_ttl_write_supported()?;
+        self.insert_with_timestamp_and_ttl_internal(key, value, timestamp, ttl_seconds)
     }
 
     /// Insert or update a key-value pair with TTL using zero-copy Bytes.
@@ -148,6 +143,7 @@ impl FeoxStore {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
+        self.ensure_ttl_write_supported()?;
         self.insert_bytes_with_timestamp_and_ttl_internal(key, value, timestamp, ttl_seconds)
     }
 
@@ -192,7 +188,7 @@ impl FeoxStore {
             return Ok(None); // No TTL set
         }
 
-        let now = self.get_timestamp();
+        let now = self.get_timestamp_pub();
         if now >= ttl_expiry {
             return Ok(Some(0)); // Already expired
         }
@@ -232,20 +228,109 @@ impl FeoxStore {
         if !self.enable_ttl {
             return Err(FeoxError::TtlNotEnabled);
         }
+        self.ensure_ttl_write_supported()?;
         self.validate_key(key)?;
 
-        let record = self
+        let (new_record, old_record, cache_guarded) = self
             .hash_table
-            .read(key, |_, v| v.clone())
-            .ok_or(FeoxError::KeyNotFound)?;
+            .update(key, |stored_key, current| {
+                let old_record = Arc::clone(current);
+                let old_expiry = old_record.ttl_expiry.load(Ordering::Acquire);
+                let now = self.get_timestamp_pub();
+                if old_expiry > 0 && now > old_expiry {
+                    return Err(FeoxError::KeyNotFound);
+                }
+                let timestamp = self.version_clock.next(stored_key, now).max(
+                    old_record
+                        .timestamp
+                        .checked_add(1)
+                        .ok_or(FeoxError::OlderTimestamp)?,
+                );
+                let expiry = ttl_expiry(now, ttl_seconds);
+                let resident = old_record.get_value();
+                let cache_entry = resident.is_none().then(|| {
+                    self.cache
+                        .as_ref()
+                        .map(|cache| cache.record_entry(stored_key, &old_record))
+                });
+                let cache_entry = cache_entry.flatten();
+                let cache_guarded = cache_entry.is_some();
+                let value = Self::ttl_replacement_value(
+                    &old_record,
+                    resident.or_else(|| cache_entry.as_ref().and_then(|entry| entry.value())),
+                );
+                let new_record = match value {
+                    TtlReplacementValue::Resident(value) if expiry == 0 => {
+                        Arc::new(Record::new_from_bytes(stored_key.clone(), value, timestamp))
+                    }
+                    TtlReplacementValue::Resident(value) => {
+                        Arc::new(Record::new_from_bytes_with_ttl(
+                            stored_key.clone(),
+                            value,
+                            timestamp,
+                            expiry,
+                        ))
+                    }
+                    TtlReplacementValue::Deferred(predecessor) => Arc::new(
+                        Record::new_deferred_with_ttl(&predecessor, timestamp, expiry),
+                    ),
+                };
 
-        let new_expiry = if ttl_seconds > 0 {
-            self.get_timestamp() + (ttl_seconds * 1_000_000_000)
-        } else {
-            0
-        };
+                old_record.link_successor(&new_record);
+                old_record.refcount.store(0, Ordering::Release);
+                *current = Arc::clone(&new_record);
+                if let Some(entry) = cache_entry {
+                    entry.remove();
+                }
+                self.publish_to_tree(stored_key, Arc::clone(&new_record));
+                self.note_ttl_transition(old_expiry, expiry);
 
-        record.ttl_expiry.store(new_expiry, Ordering::Release);
+                Ok((new_record, old_record, cache_guarded))
+            })
+            .ok_or(FeoxError::KeyNotFound)??;
+
+        if !cache_guarded {
+            self.remove_cached(key, &old_record);
+        }
+
+        if let Some(write_buffer) = self.write_buffer.as_ref() {
+            write_buffer.add_replacement(new_record, old_record)?;
+        }
+
+        Ok(())
+    }
+
+    fn ttl_replacement_value(record: &Arc<Record>, value: Option<Bytes>) -> TtlReplacementValue {
+        if let Some(value) = value {
+            return TtlReplacementValue::Resident(value);
+        }
+
+        let predecessor = Arc::clone(record);
+        #[cfg(test)]
+        crate::test_hooks::pause_at(crate::test_hooks::AFTER_TTL_DEFERRED_SOURCE);
+        TtlReplacementValue::Deferred(predecessor)
+    }
+
+    pub(super) fn note_ttl_transition(&self, previous: u64, current: u64) {
+        match (previous > 0, current > 0) {
+            (false, true) => {
+                self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
+            }
+            (true, false) => {
+                let _ = self.stats.keys_with_ttl.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |count| Some(count.saturating_sub(1)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn ensure_ttl_write_supported(&self) -> Result<()> {
+        if !self.memory_only && self.format_version == 1 {
+            return Err(FeoxError::Unsupported);
+        }
         Ok(())
     }
 
@@ -314,5 +399,14 @@ impl FeoxStore {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64
+    }
+}
+
+#[inline]
+fn ttl_expiry(timestamp: u64, ttl_seconds: u64) -> u64 {
+    if ttl_seconds == 0 {
+        0
+    } else {
+        timestamp.saturating_add(ttl_seconds.saturating_mul(1_000_000_000))
     }
 }

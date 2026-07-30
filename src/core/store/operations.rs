@@ -7,7 +7,7 @@ use crate::constants::*;
 use crate::core::record::Record;
 use crate::error::{FeoxError, Result};
 
-use super::FeoxStore;
+use super::{FeoxStore, MemoryReservation};
 
 impl FeoxStore {
     /// Insert or update a key-value pair.
@@ -148,73 +148,83 @@ impl FeoxStore {
         key: &[u8],
         value: &[u8],
         timestamp: Option<u64>,
-        ttl_expiry: u64,
+        ttl_seconds: u64,
     ) -> Result<bool> {
         let start = std::time::Instant::now();
-        let timestamp = match timestamp {
-            Some(0) | None => self.get_timestamp(),
-            Some(ts) => ts,
-        };
         self.validate_key_value(key, value)?;
-
-        // Check for existing record
-        let is_update = self.hash_table.contains(key);
-        let existing_record = self.hash_table.read(key, |_, v| v.clone());
-        if let Some(existing_record) = existing_record {
-            let existing_ts = existing_record.timestamp;
-            let existing_clone = existing_record;
-
-            if timestamp < existing_ts {
-                return Err(FeoxError::OlderTimestamp);
-            }
-
-            // Update existing record
-            return self.update_record_with_ttl(&existing_clone, value, timestamp, ttl_expiry);
-        }
+        let (timestamp, explicit_timestamp) = self.resolve_timestamp(key, timestamp);
+        let ttl_expiry = if ttl_seconds > 0 && self.enable_ttl {
+            timestamp.saturating_add(ttl_seconds.saturating_mul(1_000_000_000))
+        } else {
+            0
+        };
 
         let record_size = self.calculate_record_size(key.len(), value.len());
-        if !self.check_memory_limit(record_size) {
-            return Err(FeoxError::OutOfMemory);
-        }
 
-        // Create new record with TTL if specified and TTL is enabled
-        let record = if ttl_expiry > 0 && self.enable_ttl {
-            self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
-            Arc::new(Record::new_with_timestamp_ttl(
-                key.to_vec(),
-                value.to_vec(),
-                timestamp,
-                ttl_expiry,
-            ))
-        } else {
-            Arc::new(Record::new(key.to_vec(), value.to_vec(), timestamp))
-        };
+        loop {
+            let existing_record = self.hash_table.read(key, |_, v| v.clone());
+            if let Some(existing_record) = existing_record {
+                if timestamp <= existing_record.timestamp {
+                    return Err(FeoxError::OlderTimestamp);
+                }
+                crate::test_hooks::pause_at(crate::test_hooks::AFTER_UPSERT_READ);
 
-        let key_vec = record.key.clone();
+                match self.update_record_with_ttl(
+                    &existing_record,
+                    value,
+                    timestamp,
+                    explicit_timestamp,
+                    ttl_expiry,
+                ) {
+                    Err(FeoxError::KeyNotFound) => continue,
+                    result => return result,
+                }
+            }
 
-        // Insert into hash table
-        self.hash_table.upsert(key_vec.clone(), Arc::clone(&record));
+            let reservation = self.reserve_memory(record_size)?;
 
-        // Insert into lock-free skip list for ordered access
-        self.tree.insert(key_vec, Arc::clone(&record));
+            let record = if ttl_expiry > 0 && self.enable_ttl {
+                Arc::new(Record::new_with_timestamp_ttl(
+                    key.to_vec(),
+                    value.to_vec(),
+                    timestamp,
+                    ttl_expiry,
+                ))
+            } else {
+                Arc::new(Record::new(key.to_vec(), value.to_vec(), timestamp))
+            };
 
-        // Update statistics
-        self.stats.record_count.fetch_add(1, Ordering::AcqRel);
-        self.stats
-            .memory_usage
-            .fetch_add(record_size, Ordering::AcqRel);
-        self.stats
-            .record_insert(start.elapsed().as_nanos() as u64, is_update);
+            let key_vec = record.key.clone();
 
-        // Only do persistence if not in memory-only mode
-        if !self.memory_only {
-            // Queue for persistence if write buffer exists
-            if let Some(ref wb) = self.write_buffer {
+            let buffered_record = match self.hash_table.entry(key_vec.clone()) {
+                scc::hash_map::Entry::Vacant(entry) => {
+                    let buffered_record = self
+                        .write_buffer
+                        .as_ref()
+                        .filter(|_| !self.memory_only)
+                        .map(|_| Arc::clone(&record));
+                    let _entry = entry.insert_entry(Arc::clone(&record));
+                    self.insert_into_tree(key_vec, record);
+                    self.observe_published_timestamp(key, timestamp, explicit_timestamp);
+                    reservation.commit();
+                    if ttl_expiry > 0 && self.enable_ttl {
+                        self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.stats.record_count.fetch_add(1, Ordering::Relaxed);
+                    buffered_record
+                }
+                scc::hash_map::Entry::Occupied(_) => continue,
+            };
+
+            self.stats
+                .record_insert(start.elapsed().as_nanos() as u64, false);
+
+            if let (Some(wb), Some(record)) = (&self.write_buffer, buffered_record) {
                 wb.add_write(Operation::Insert, record, 0)?;
             }
-        }
 
-        Ok(!is_update)
+            return Ok(true);
+        }
     }
 
     /// Internal method to insert a Bytes value with timestamp and TTL (zero-copy)
@@ -226,89 +236,114 @@ impl FeoxStore {
         ttl_seconds: u64,
     ) -> Result<bool> {
         let start = std::time::Instant::now();
-        // Get timestamp before any operations
-        let timestamp = match timestamp {
-            Some(0) | None => self.get_timestamp(),
-            Some(ts) => ts,
-        };
-
-        self.validate_key(key)?;
+        self.validate_new_key(key)?;
         let value_len = value.len();
         if value_len == 0 || value_len > MAX_VALUE_SIZE {
             return Err(FeoxError::InvalidValueSize);
         }
+        let (timestamp, explicit_timestamp) = self.resolve_timestamp(key, timestamp);
 
-        // Check for existing record
-        let is_update = self.hash_table.contains(key);
-        let existing_record = self.hash_table.read(key, |_, v| v.clone());
-        if let Some(existing_record) = existing_record {
-            let existing_ts = existing_record.timestamp;
+        let ttl_expiry = if ttl_seconds > 0 && self.enable_ttl {
+            timestamp.saturating_add(ttl_seconds.saturating_mul(1_000_000_000))
+        } else {
+            0
+        };
+        self.insert_bytes_with_expiry(key, value, timestamp, explicit_timestamp, ttl_expiry, start)
+    }
 
-            if timestamp < existing_ts {
-                return Err(FeoxError::OlderTimestamp);
+    pub(super) fn insert_migrated_bytes(
+        &self,
+        key: &[u8],
+        value: Bytes,
+        timestamp: u64,
+        ttl_expiry: u64,
+    ) -> Result<bool> {
+        let start = std::time::Instant::now();
+        self.validate_new_key(key)?;
+        if value.is_empty() || value.len() > MAX_VALUE_SIZE {
+            return Err(FeoxError::InvalidValueSize);
+        }
+        self.insert_bytes_with_expiry(key, value, timestamp, true, ttl_expiry, start)
+    }
+
+    #[inline]
+    fn insert_bytes_with_expiry(
+        &self,
+        key: &[u8],
+        value: Bytes,
+        timestamp: u64,
+        explicit_timestamp: bool,
+        ttl_expiry: u64,
+        start: std::time::Instant,
+    ) -> Result<bool> {
+        let new_size = self.calculate_record_size(key.len(), value.len());
+        loop {
+            let existing_record = self.hash_table.read(key, |_, v| v.clone());
+            if let Some(existing_record) = existing_record {
+                if timestamp <= existing_record.timestamp {
+                    return Err(FeoxError::OlderTimestamp);
+                }
+
+                match self.update_record_with_ttl_bytes(
+                    &existing_record,
+                    value.clone(),
+                    timestamp,
+                    explicit_timestamp,
+                    ttl_expiry,
+                ) {
+                    Err(FeoxError::KeyNotFound) => continue,
+                    result => return result,
+                }
             }
 
-            // Calculate TTL expiry
-            let ttl_expiry = if ttl_seconds > 0 && self.enable_ttl {
-                timestamp + (ttl_seconds * 1_000_000_000)
+            let reservation = self.reserve_memory(new_size)?;
+
+            let record = if ttl_expiry > 0 {
+                Arc::new(Record::new_from_bytes_with_ttl(
+                    key.to_vec(),
+                    value.clone(),
+                    timestamp,
+                    ttl_expiry,
+                ))
             } else {
-                0
+                Arc::new(Record::new_from_bytes(
+                    key.to_vec(),
+                    value.clone(),
+                    timestamp,
+                ))
             };
 
-            // Update existing record using the Bytes version
-            return self.update_record_with_ttl_bytes(
-                &existing_record,
-                value,
-                timestamp,
-                ttl_expiry,
-            );
-        }
+            let key_vec = record.key.clone();
 
-        // This point is only reached for new inserts (not updates)
-        let new_size = self.calculate_record_size(key.len(), value_len);
-        if !self.check_memory_limit(new_size) {
-            return Err(FeoxError::OutOfMemory);
-        }
+            let buffered_record = match self.hash_table.entry(key_vec.clone()) {
+                scc::hash_map::Entry::Vacant(entry) => {
+                    let buffered_record = self
+                        .write_buffer
+                        .as_ref()
+                        .filter(|_| !self.memory_only)
+                        .map(|_| Arc::clone(&record));
+                    let _entry = entry.insert_entry(Arc::clone(&record));
+                    self.insert_into_tree(key_vec, record);
+                    self.observe_published_timestamp(key, timestamp, explicit_timestamp);
+                    reservation.commit();
+                    if ttl_expiry > 0 {
+                        self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.stats.record_count.fetch_add(1, Ordering::Relaxed);
+                    buffered_record
+                }
+                scc::hash_map::Entry::Occupied(_) => continue,
+            };
 
-        // Create new record with Bytes value
-        let record = if ttl_seconds > 0 && self.enable_ttl {
-            let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000);
-            self.stats.keys_with_ttl.fetch_add(1, Ordering::Relaxed);
-            Arc::new(Record::new_from_bytes_with_ttl(
-                key.to_vec(),
-                value,
-                timestamp,
-                ttl_expiry,
-            ))
-        } else {
-            Arc::new(Record::new_from_bytes(key.to_vec(), value, timestamp))
-        };
+            self.stats
+                .record_insert(start.elapsed().as_nanos() as u64, false);
 
-        let key_vec = record.key.clone();
-
-        // Insert into hash table
-        self.hash_table.upsert(key_vec.clone(), Arc::clone(&record));
-
-        // Insert into skip list for ordered access
-        self.tree.insert(key_vec, Arc::clone(&record));
-
-        // Update statistics
-        self.stats.record_count.fetch_add(1, Ordering::AcqRel);
-        self.stats
-            .memory_usage
-            .fetch_add(new_size, Ordering::AcqRel);
-        self.stats
-            .record_insert(start.elapsed().as_nanos() as u64, is_update);
-
-        // Only do persistence if not in memory-only mode
-        if !self.memory_only {
-            // Queue for persistence if write buffer exists
-            if let Some(ref wb) = self.write_buffer {
+            if let (Some(wb), Some(record)) = (&self.write_buffer, buffered_record) {
                 wb.add_write(Operation::Insert, record, 0)?;
             }
-        }
 
-        Ok(!is_update)
+            return Ok(true);
+        }
     }
 
     /// Retrieve a value by key.
@@ -356,36 +391,11 @@ impl FeoxStore {
             .read(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
-        // Check TTL expiry if TTL is enabled
-        if self.enable_ttl {
-            let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
-            if ttl_expiry > 0 {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                if now > ttl_expiry {
-                    self.stats.ttl_expired_lazy.fetch_add(1, Ordering::Relaxed);
-                    return Err(FeoxError::KeyNotFound);
-                }
-            }
-        }
-
-        let (value, cache_hit) = if let Some(value) = record.get_value() {
-            (value, true)
-        } else if let Some(value) = self
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.get_for_record(key, &record))
-        {
-            (value, true)
-        } else {
-            (Bytes::from(self.load_value_from_disk(&record)?), false)
-        };
+        let (value, cache_hit, source) = self.resolve_value(key, record)?;
 
         if !cache_hit {
             if let Some(ref cache) = self.cache {
-                cache.insert_for_record(key.to_vec(), value.clone(), Arc::clone(&record));
+                cache.insert_for_record(key.to_vec(), value.clone(), &source);
             }
         }
 
@@ -437,36 +447,11 @@ impl FeoxStore {
             .read(key, |_, v| v.clone())
             .ok_or(FeoxError::KeyNotFound)?;
 
-        // Check TTL expiry if TTL is enabled
-        if self.enable_ttl {
-            let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
-            if ttl_expiry > 0 {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                if now > ttl_expiry {
-                    self.stats.ttl_expired_lazy.fetch_add(1, Ordering::Relaxed);
-                    return Err(FeoxError::KeyNotFound);
-                }
-            }
-        }
-
-        let (value, cache_hit) = if let Some(val) = record.get_value() {
-            (val, true)
-        } else if let Some(value) = self
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.get_for_record(key, &record))
-        {
-            (value, true)
-        } else {
-            (Bytes::from(self.load_value_from_disk(&record)?), false)
-        };
+        let (value, cache_hit, source) = self.resolve_value(key, record)?;
 
         if !cache_hit {
             if let Some(ref cache) = self.cache {
-                cache.insert_for_record(key.to_vec(), value.clone(), Arc::clone(&record));
+                cache.insert_for_record(key.to_vec(), value.clone(), &source);
             }
         }
 
@@ -526,43 +511,35 @@ impl FeoxStore {
     /// * `OlderTimestamp` - Timestamp is not newer than existing record
     pub fn delete_with_timestamp(&self, key: &[u8], timestamp: Option<u64>) -> Result<()> {
         let start = std::time::Instant::now();
-        let timestamp = match timestamp {
-            Some(0) | None => self.get_timestamp(),
-            Some(ts) => ts,
-        };
         self.validate_key(key)?;
+        let (timestamp, explicit_timestamp) = self.resolve_timestamp(key, timestamp);
 
-        // Remove from hash table and get the record
-        let record_pair = self.hash_table.remove(key).ok_or(FeoxError::KeyNotFound)?;
-        let record = record_pair.1;
-
-        if timestamp < record.timestamp {
-            // Put it back if timestamp is older
-            self.hash_table.upsert(key.to_vec(), record);
-            return Err(FeoxError::OlderTimestamp);
-        }
-
-        let record_size = record.calculate_size();
-        let old_value_len = record.value_len;
-
-        // Mark record as deleted by setting refcount to 0
-        record.refcount.store(0, Ordering::Release);
-
-        // Remove from lock-free skip list
-        self.tree.remove(key);
-
-        // Update statistics
-        self.stats.record_count.fetch_sub(1, Ordering::AcqRel);
-        self.stats
-            .memory_usage
-            .fetch_sub(record_size, Ordering::AcqRel);
-
-        // Clear from cache
-        if self.enable_caching {
-            if let Some(ref cache) = self.cache {
-                cache.remove(key);
+        let (record, old_value_len) = match self.hash_table.entry(key.to_vec()) {
+            scc::hash_map::Entry::Occupied(entry) => {
+                let record = Arc::clone(entry.get());
+                if timestamp <= record.timestamp {
+                    return Err(FeoxError::OlderTimestamp);
+                }
+                let record_size = record.calculate_size();
+                let old_value_len = record.value_len;
+                record.retired_at.store(timestamp, Ordering::Release);
+                record.refcount.store(0, Ordering::Release);
+                // Ordered index first: a key vanishing early from a range scan is
+                // benign, whereas a deleted key lingering there is a phantom.
+                self.tree.remove(key);
+                self.stats.record_count.fetch_sub(1, Ordering::Relaxed);
+                self.stats
+                    .memory_usage
+                    .fetch_sub(record_size, Ordering::Relaxed);
+                self.note_ttl_transition(record.ttl_expiry.load(Ordering::Acquire), 0);
+                self.observe_published_timestamp(key, timestamp, explicit_timestamp);
+                let _ = entry.remove();
+                (record, old_value_len)
             }
-        }
+            scc::hash_map::Entry::Vacant(_) => return Err(FeoxError::KeyNotFound),
+        };
+
+        self.remove_cached(key, &record);
 
         // Queue deletion for persistence if write buffer exists and not memory-only
         if !self.memory_only {
@@ -619,15 +596,31 @@ impl FeoxStore {
     // Internal helper methods
 
     pub(super) fn validate_key_value(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        if key.is_empty() || key.len() > MAX_KEY_SIZE {
-            return Err(FeoxError::InvalidKeySize);
-        }
+        self.validate_new_key(key)?;
 
         if value.is_empty() || value.len() > MAX_VALUE_SIZE {
             return Err(FeoxError::InvalidValueSize);
         }
 
         Ok(())
+    }
+
+    /// Bound for a key that is about to create a record. A persistent store must
+    /// refuse keys it could never rebuild an index from: the record would be written,
+    /// silently dropped on restart, and its extent handed out again while the old
+    /// bytes are still on disk to be misparsed as headers.
+    pub(super) fn validate_new_key(&self, key: &[u8]) -> Result<()> {
+        if key.is_empty() || key.len() > MAX_KEY_SIZE {
+            return Err(FeoxError::InvalidKeySize);
+        }
+        if self.memory_only || key.len() <= MAX_RECOVERABLE_KEY_SIZE {
+            return Ok(());
+        }
+        if self.format_version == 1 && key.len() <= MAX_RECOVERABLE_KEY_SIZE_V1 {
+            return Ok(());
+        }
+
+        Err(FeoxError::InvalidKeySize)
     }
 
     pub(super) fn validate_key(&self, key: &[u8]) -> Result<()> {
@@ -638,21 +631,135 @@ impl FeoxStore {
         Ok(())
     }
 
-    pub(super) fn check_memory_limit(&self, size: usize) -> bool {
-        match self.max_memory {
-            Some(limit) => {
-                let current = self.stats.memory_usage.load(Ordering::Acquire);
-                current + size <= limit
-            }
-            None => true,
+    #[inline]
+    pub(super) fn reserve_memory(&self, amount: usize) -> Result<MemoryReservation<'_>> {
+        let usage = &self.stats.memory_usage;
+        if amount == 0 {
+            return Ok(MemoryReservation { usage, amount });
         }
+        let Some(limit) = self.max_memory else {
+            usage.fetch_add(amount, Ordering::Relaxed);
+            return Ok(MemoryReservation { usage, amount });
+        };
+        let mut current = usage.load(Ordering::Relaxed);
+        loop {
+            let next = current.checked_add(amount).ok_or(FeoxError::OutOfMemory)?;
+            if next > limit {
+                return Err(FeoxError::OutOfMemory);
+            }
+            match usage.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Ok(MemoryReservation { usage, amount }),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn release_memory(&self, amount: usize) {
+        self.stats.memory_usage.fetch_sub(amount, Ordering::Relaxed);
     }
 
     pub(super) fn calculate_record_size(&self, key_len: usize, value_len: usize) -> usize {
         std::mem::size_of::<Record>() + key_len + value_len
     }
 
-    pub(super) fn get_timestamp(&self) -> u64 {
-        self.get_timestamp_pub()
+    /// Resolve a key's value from memory, cache, or disk.
+    ///
+    /// A disk read can come back rejected when the record was retired and its
+    /// extent reused while this reader held it. That is a stale handle rather than
+    /// a failure, so the current generation is fetched from the hash table and the
+    /// read retried. Returns the record the value actually came from, so callers
+    /// populate the cache against the right generation.
+    pub(super) fn resolve_value(
+        &self,
+        key: &[u8],
+        record: Arc<Record>,
+    ) -> Result<(Bytes, bool, Arc<Record>)> {
+        let mut record = record;
+        for _ in 0..STALE_READ_RETRY_LIMIT {
+            match self.resolve_record_value(key, &record)? {
+                Some((value, cache_hit)) => return Ok((value, cache_hit, record)),
+                None => {
+                    record = self
+                        .hash_table
+                        .read(key, |_, v| v.clone())
+                        .ok_or(FeoxError::KeyNotFound)?;
+                }
+            }
+        }
+        Err(FeoxError::StaleExtent)
+    }
+
+    pub(super) fn resolve_value_ref(&self, key: &[u8], record: &Arc<Record>) -> Result<Bytes> {
+        if let Some((value, _)) = self.resolve_record_value(key, record)? {
+            return Ok(value);
+        }
+
+        let record = self
+            .hash_table
+            .read(key, |_, record| Arc::clone(record))
+            .ok_or(FeoxError::KeyNotFound)?;
+        self.resolve_value(key, record).map(|(value, _, _)| value)
+    }
+
+    fn resolve_record_value(
+        &self,
+        key: &[u8],
+        record: &Arc<Record>,
+    ) -> Result<Option<(Bytes, bool)>> {
+        if self.enable_ttl {
+            let ttl_expiry = record.ttl_expiry.load(Ordering::Acquire);
+            if ttl_expiry > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                if now > ttl_expiry {
+                    self.stats.ttl_expired_lazy.fetch_add(1, Ordering::Relaxed);
+                    return Err(FeoxError::KeyNotFound);
+                }
+            }
+        }
+        if let Some(value) = record.get_value() {
+            return Ok(Some((value, true)));
+        }
+        if let Some(value) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.get_for_record(key, record))
+        {
+            return Ok(Some((value, true)));
+        }
+        match self.load_value_from_disk(record) {
+            Ok(value) => Ok(Some((value, false))),
+            Err(FeoxError::StaleExtent) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Timestamps double as record version numbers and must increase for a key.
+    #[inline]
+    pub(super) fn get_timestamp(&self, key: &[u8]) -> u64 {
+        self.version_clock.next(key, self.get_timestamp_pub())
+    }
+
+    #[inline]
+    pub(super) fn resolve_timestamp(&self, key: &[u8], timestamp: Option<u64>) -> (u64, bool) {
+        match timestamp {
+            Some(timestamp) if timestamp != 0 => (timestamp, true),
+            _ => (self.get_timestamp(key), false),
+        }
+    }
+
+    #[inline]
+    pub(super) fn observe_published_timestamp(&self, key: &[u8], timestamp: u64, explicit: bool) {
+        if explicit {
+            self.version_clock.observe(key, timestamp);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timestamp_shard_for_test(&self, key: &[u8]) -> usize {
+        self.version_clock.shard_index(key)
     }
 }

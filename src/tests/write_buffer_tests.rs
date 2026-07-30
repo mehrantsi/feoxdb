@@ -228,17 +228,14 @@ fn test_write_buffer_full_trigger() {
 #[test]
 fn test_write_entry_fields() {
     use std::sync::atomic::Ordering;
-    use std::time::Instant;
 
     let record = Arc::new(Record::new(b"key".to_vec(), b"value".to_vec(), 100));
 
     let entry = WriteEntry {
         op: crate::constants::Operation::Insert,
         record: record.clone(),
-        old_value_len: 0,
         work_status: std::sync::atomic::AtomicU32::new(0),
         retry_count: std::sync::atomic::AtomicU32::new(0),
-        timestamp: Instant::now(),
     };
 
     assert_eq!(entry.work_status.load(Ordering::Relaxed), 0);

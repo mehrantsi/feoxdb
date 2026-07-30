@@ -1,7 +1,13 @@
+use crossbeam_epoch as epoch;
+use std::ops::Bound;
+
 use crate::constants::MAX_KEY_SIZE;
 use crate::error::{FeoxError, Result};
 
 use super::FeoxStore;
+
+const RANGE_PREALLOC_LIMIT: usize = 1024;
+const RANGE_REPIN_INTERVAL: usize = 256;
 
 impl FeoxStore {
     /// Perform a range query on the store.
@@ -46,21 +52,40 @@ impl FeoxStore {
             return Err(FeoxError::InvalidKeySize);
         }
 
-        let mut results = Vec::new();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut results = Vec::with_capacity(limit.min(self.tree.len()).min(RANGE_PREALLOC_LIMIT));
 
-        for entry in self.tree.range(start_key.to_vec()..=end_key.to_vec()) {
-            if results.len() >= limit {
+        let mut guard = epoch::pin();
+        let mut entries_since_repin = 0;
+        let mut cursor = self.tree.lower_bound(Bound::Included(start_key));
+
+        while let Some(entry) = cursor {
+            if results.len() >= limit || entry.key().as_slice() > end_key {
                 break;
             }
 
-            let record = entry.value();
-            let value = if let Some(val) = record.get_value() {
-                val.to_vec()
-            } else {
-                self.load_value_from_disk(record)?
+            let value = {
+                let record = entry.value().load(&guard);
+                self.resolve_value_ref(entry.key(), record)
+            };
+            entries_since_repin += 1;
+            if entries_since_repin == RANGE_REPIN_INTERVAL {
+                guard.repin();
+                entries_since_repin = 0;
+            }
+            let value = match value {
+                Ok(value) => value.to_vec(),
+                Err(FeoxError::StaleExtent) | Err(FeoxError::KeyNotFound) => {
+                    cursor = entry.next();
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
 
             results.push((entry.key().clone(), value));
+            cursor = entry.next();
         }
 
         Ok(results)

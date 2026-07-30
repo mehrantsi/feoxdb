@@ -1,4 +1,5 @@
 use crate::error::{FeoxError, Result};
+use std::sync::Arc;
 
 use super::FeoxStore;
 
@@ -68,34 +69,39 @@ impl FeoxStore {
         patch: &[u8],
         timestamp: Option<u64>,
     ) -> Result<()> {
-        let timestamp = match timestamp {
-            Some(0) | None => self.get_timestamp(),
-            Some(ts) => ts,
-        };
         self.validate_key(key)?;
+        let timestamp = self.resolve_timestamp(key, timestamp);
+        let timestamp_value = timestamp.0;
 
-        // Get the value and release the lock immediately
-        let current_value = {
+        let start = std::time::Instant::now();
+        let mut observed = None;
+        loop {
             let record = self
                 .hash_table
-                .read(key, |_, v| v.clone())
+                .read(key, |_, record| record.clone())
                 .ok_or(FeoxError::KeyNotFound)?;
-
-            if timestamp < record.timestamp {
+            let observed = observed.get_or_insert_with(|| Arc::clone(&record));
+            if !Arc::ptr_eq(observed, &record) && timestamp_value <= observed.retirement_timestamp()
+            {
                 return Err(FeoxError::OlderTimestamp);
             }
 
-            if let Some(val) = record.get_value() {
-                val.to_vec()
-            } else {
-                self.load_value_from_disk(&record)?
+            if timestamp_value <= record.timestamp {
+                return Err(FeoxError::OlderTimestamp);
             }
-        };
 
-        let new_value = crate::utils::json_patch::apply_json_patch(&current_value, patch)?;
+            let (current_value, _, source) = self.resolve_value(key, record)?;
+            if !Arc::ptr_eq(observed, &source) && timestamp_value <= observed.retirement_timestamp()
+            {
+                return Err(FeoxError::OlderTimestamp);
+            }
+            let new_value = crate::utils::json_patch::apply_json_patch(&current_value, patch)?;
+            self.validate_key_value(key, &new_value)?;
+            crate::test_hooks::pause_at(crate::test_hooks::AFTER_JSON_PATCH_READ);
 
-        // Now update without holding any references
-        self.insert_with_timestamp(key, &new_value, Some(timestamp))?;
-        Ok(())
+            if self.replace_record_if_current(key, &source, &new_value, timestamp, 0, start)? {
+                return Ok(());
+            }
+        }
     }
 }

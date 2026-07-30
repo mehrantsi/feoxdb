@@ -352,10 +352,14 @@ pub mod core;
 pub mod error;
 pub mod stats;
 pub mod storage;
+mod test_hooks;
 pub mod utils;
 
 pub use bytes::Bytes;
-pub use core::store::{FeoxStore, StoreBuilder, StoreConfig};
+pub use core::store::{
+    migrate, FeoxStore, MigrationError, MigrationOptions, MigrationReport, MigrationResult,
+    StoreBuilder, StoreConfig,
+};
 pub use error::{FeoxError, Result};
 pub use stats::Statistics;
 

@@ -5,7 +5,7 @@ use crate::storage::metadata::Metadata;
 fn test_metadata_creation() {
     let metadata = Metadata::new();
 
-    assert_eq!(metadata.version, 2);
+    assert_eq!(metadata.version, 3);
     assert_eq!(metadata.total_records, 0);
     assert_eq!(metadata.total_size, 0);
     assert!(metadata.creation_time > 0);
@@ -33,11 +33,15 @@ fn test_metadata_serialization() {
     metadata.fragmentation = 42;
     metadata.device_size = DEFAULT_DEVICE_SIZE;
 
-    let bytes = metadata.as_bytes();
-    assert_eq!(bytes.len(), std::mem::size_of::<Metadata>());
+    let bytes = metadata.encode();
+    assert_eq!(bytes.len(), 136);
 
     // Verify signature
     assert_eq!(&bytes[..FEOX_SIGNATURE_SIZE], FEOX_SIGNATURE);
+    assert_eq!(&bytes[8..12], &3_u32.to_le_bytes());
+    assert_eq!(&bytes[16..24], &12_345_u64.to_le_bytes());
+    assert_eq!(&bytes[24..32], &67_890_u64.to_le_bytes());
+    assert_eq!(&bytes[44..48], &42_u32.to_le_bytes());
 }
 
 #[test]
@@ -49,8 +53,8 @@ fn test_metadata_deserialization() {
     original.device_size = 1024 * 1024 * 1024;
     original.update();
 
-    let bytes = original.as_bytes();
-    let restored = Metadata::from_bytes(bytes).unwrap();
+    let bytes = original.encode();
+    let restored = Metadata::from_bytes(&bytes).unwrap();
 
     assert_eq!(restored.version, original.version);
     assert_eq!(restored.total_records, original.total_records);
@@ -75,6 +79,55 @@ fn test_metadata_invalid_size() {
     let bytes = vec![0u8; 100]; // Wrong size
     let result = Metadata::from_bytes(&bytes);
     assert!(result.is_none());
+}
+
+#[test]
+fn test_metadata_rejects_future_version() {
+    let mut metadata = Metadata::new();
+    metadata.device_size = DEFAULT_DEVICE_SIZE;
+    metadata.version += 1;
+
+    assert!(Metadata::from_bytes(&metadata.encode()).is_none());
+}
+
+#[test]
+fn test_metadata_checksum_rejects_a_torn_version() {
+    let mut metadata = Metadata::new();
+    metadata.device_size = DEFAULT_DEVICE_SIZE;
+    metadata.update();
+
+    metadata.version = 2;
+    assert!(Metadata::from_bytes(&metadata.encode()).is_none());
+}
+
+#[test]
+fn test_metadata_checksum_covers_mutable_fields() {
+    let mut metadata = Metadata::new();
+    metadata.device_size = DEFAULT_DEVICE_SIZE;
+    metadata.update();
+
+    metadata.total_records = 1;
+    assert!(Metadata::from_bytes(&metadata.encode()).is_none());
+
+    metadata.update();
+    assert!(Metadata::from_bytes(&metadata.encode()).is_some());
+}
+
+#[test]
+fn test_checksumless_legacy_metadata_is_accepted() {
+    for version in [1, 2] {
+        let mut metadata = Metadata::new();
+        metadata.version = version;
+        metadata.device_size = DEFAULT_DEVICE_SIZE;
+        metadata.update();
+
+        let mut bytes = metadata.encode();
+        bytes[64..132].fill(0);
+
+        let restored = Metadata::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.version, version);
+        assert_eq!(restored.device_size, DEFAULT_DEVICE_SIZE);
+    }
 }
 
 #[test]
@@ -117,8 +170,8 @@ fn test_metadata_roundtrip() {
     metadata.update();
 
     // Serialize and deserialize
-    let bytes = metadata.as_bytes();
-    let restored = Metadata::from_bytes(bytes).unwrap();
+    let bytes = metadata.encode();
+    let restored = Metadata::from_bytes(&bytes).unwrap();
 
     // Everything should match
     assert_eq!(metadata.version, restored.version);

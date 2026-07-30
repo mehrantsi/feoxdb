@@ -38,6 +38,31 @@ fn test_atomic_increment_create_if_not_exists() {
 }
 
 #[test]
+fn test_atomic_increment_respects_memory_limit_on_create() {
+    let store = FeoxStore::builder().max_memory(1).build().unwrap();
+
+    assert!(matches!(
+        store.atomic_increment(b"counter", 1),
+        Err(FeoxError::OutOfMemory)
+    ));
+    assert!(!store.contains_key(b"counter"));
+}
+
+#[test]
+fn test_atomic_increment_treats_an_expired_counter_as_absent() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    store
+        .insert_with_ttl_and_timestamp(b"counter", &9_i64.to_le_bytes(), 1, Some(1))
+        .unwrap();
+
+    assert_eq!(store.atomic_increment(b"counter", 2).unwrap(), 2);
+    assert_eq!(
+        i64::from_le_bytes(store.get(b"counter").unwrap().try_into().unwrap()),
+        2
+    );
+}
+
+#[test]
 fn test_atomic_increment_invalid_value() {
     let store = FeoxStore::new(None).unwrap();
 
@@ -63,6 +88,90 @@ fn test_atomic_increment_saturation() {
     // Increment should saturate, not overflow
     let val = store.atomic_increment(key, 10).unwrap();
     assert_eq!(val, i64::MAX);
+}
+
+#[test]
+fn test_atomic_increment_timestamp_conflict() {
+    let store = FeoxStore::new(None).unwrap();
+    let key = b"timestamped_counter";
+
+    assert_eq!(
+        store
+            .atomic_increment_with_timestamp(key, 1, Some(100))
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        store.atomic_increment_with_timestamp(key, 1, Some(100)),
+        Err(FeoxError::OlderTimestamp)
+    ));
+    assert_eq!(
+        store
+            .atomic_increment_with_timestamp(key, 1, Some(101))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn test_atomic_increment_with_ttl() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    let key = b"expiring_counter";
+
+    assert_eq!(store.atomic_increment_with_ttl(key, 4, 60).unwrap(), 4);
+    assert_eq!(store.atomic_increment_with_ttl(key, 3, 60).unwrap(), 7);
+    assert!(store.get_ttl(key).unwrap().is_some());
+}
+
+#[test]
+fn test_atomic_increment_reinitializes_expired_counter() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    let key = b"expired_counter";
+
+    assert_eq!(
+        store
+            .atomic_increment_with_timestamp_and_ttl(key, 4, Some(1), 1)
+            .unwrap(),
+        4
+    );
+    assert_eq!(store.atomic_increment(key, 3).unwrap(), 3);
+    assert_eq!(
+        i64::from_le_bytes(store.get(key).unwrap().try_into().unwrap()),
+        3
+    );
+}
+
+#[test]
+fn test_atomic_operations_keep_ttl_statistics_balanced() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+    let key = b"ttl_counter";
+    store
+        .insert_with_ttl(key, &1_i64.to_le_bytes(), 60)
+        .unwrap();
+    assert_eq!(store.stats().keys_with_ttl, 1);
+
+    assert_eq!(store.atomic_increment(key, 1).unwrap(), 2);
+    assert_eq!(store.stats().keys_with_ttl, 0);
+
+    assert!(store
+        .compare_and_swap_with_ttl(key, &2_i64.to_le_bytes(), &3_i64.to_le_bytes(), 60)
+        .unwrap());
+    assert_eq!(store.stats().keys_with_ttl, 1);
+
+    store.delete(key).unwrap();
+    assert_eq!(store.stats().keys_with_ttl, 0);
+}
+
+#[test]
+fn test_atomic_ttl_arithmetic_saturates() {
+    let store = FeoxStore::builder().enable_ttl(true).build().unwrap();
+
+    assert_eq!(
+        store
+            .atomic_increment_with_timestamp_and_ttl(b"counter", 1, Some(u64::MAX - 1), u64::MAX,)
+            .unwrap(),
+        1
+    );
 }
 
 #[test]

@@ -1,7 +1,9 @@
-use crate::core::record::{AtomicLink, Record};
+use crate::constants::{FEOX_BLOCK_SIZE, SECTOR_HEADER_SIZE};
+use crate::core::record::{AtomicLink, Record, TreeSlot};
 use bytes::Bytes;
 use crossbeam_epoch;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[test]
 fn test_record_creation() {
@@ -48,6 +50,24 @@ fn test_record_size_calculation() {
     let disk_size = record.calculate_disk_size();
     assert!(disk_size > 0);
     assert_eq!(disk_size % 4096, 0); // Should be aligned to block size
+}
+
+#[test]
+fn test_record_disk_size_uses_the_current_ttl_layout() {
+    let key = b"key".to_vec();
+    let header_size = SECTOR_HEADER_SIZE
+        + std::mem::size_of::<u16>()
+        + key.len()
+        + 3 * std::mem::size_of::<u64>();
+    let record = Record::new(key, vec![0; FEOX_BLOCK_SIZE - header_size], 100);
+    assert_eq!(record.calculate_disk_size(), FEOX_BLOCK_SIZE);
+
+    let record = Record::new(
+        b"key".to_vec(),
+        vec![0; FEOX_BLOCK_SIZE - header_size + 1],
+        100,
+    );
+    assert_eq!(record.calculate_disk_size(), 2 * FEOX_BLOCK_SIZE);
 }
 
 #[test]
@@ -105,6 +125,20 @@ fn test_atomic_link_operations() {
     // Verify new value is stored
     let loaded = link.load(guard);
     assert!(loaded.is_some());
+}
+
+#[test]
+fn test_tree_slot_swap_preserves_guarded_generation() {
+    let first = Arc::new(Record::new(b"key".to_vec(), b"first".to_vec(), 100));
+    let slot = TreeSlot::new(Arc::clone(&first));
+    let guard = crossbeam_epoch::pin();
+    let loaded = slot.load(&guard);
+
+    let second = Arc::new(Record::new(b"key".to_vec(), b"second".to_vec(), 200));
+    slot.store(Arc::clone(&second));
+
+    assert!(Arc::ptr_eq(loaded, &first));
+    assert!(Arc::ptr_eq(slot.load(&guard), &second));
 }
 
 #[test]

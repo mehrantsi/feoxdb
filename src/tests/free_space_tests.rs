@@ -10,11 +10,9 @@ fn test_initialization() {
     let device_size = DEFAULT_DEVICE_SIZE;
     manager.initialize(device_size).unwrap();
 
-    // Should have one free chunk starting at sector 16
     assert_eq!(manager.get_free_chunks_count(), 1);
 
-    // Total free should be device size minus metadata (16 sectors)
-    let expected_free = device_size - (16 * FEOX_BLOCK_SIZE as u64);
+    let expected_free = device_size - FEOX_DATA_START_BLOCK * FEOX_BLOCK_SIZE as u64;
     assert_eq!(manager.get_total_free(), expected_free);
 }
 
@@ -241,10 +239,25 @@ fn test_no_metadata_allocation() {
     let mut manager = FreeSpaceManager::new();
     manager.initialize(DEFAULT_DEVICE_SIZE).unwrap();
 
-    // First allocation should never be in metadata area (sectors 0-15)
     for _ in 0..100 {
         let sector = manager.allocate_sectors(1).unwrap();
-        assert!(sector >= 16);
+        assert!(sector >= FEOX_DATA_START_BLOCK);
         manager.release_sectors(sector, 1).unwrap();
     }
+}
+
+#[test]
+fn reserved_sectors_cannot_be_released() {
+    let mut manager = FreeSpaceManager::new();
+    manager.initialize(DEFAULT_DEVICE_SIZE).unwrap();
+    let total_free = manager.get_total_free();
+
+    for sector in 0..FEOX_DATA_START_BLOCK {
+        assert!(matches!(
+            manager.release_sectors(sector, 1),
+            Err(FeoxError::InvalidArgument)
+        ));
+    }
+
+    assert_eq!(manager.get_total_free(), total_free);
 }

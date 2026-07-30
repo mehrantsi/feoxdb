@@ -27,11 +27,27 @@ pub const SECTOR_SHIFT: usize = 9;
 pub const SECTOR_SIZE: usize = 512;
 pub const SECTOR_HEADER_SIZE: usize = 4;
 pub const SECTOR_MARKER: u16 = 0xABCD;
+pub(crate) const STALE_READ_RETRY_LIMIT: usize = 4;
+
+// Retired-extent marker written over every block of a freed extent.
+// Layout: tag(8) | remaining blocks(8) | sector-bound token(2) | state(1)
+pub(crate) const DELETION_MARKER: &[u8; 8] = b"\0DELETED";
+pub(crate) const DELETION_MARKER_SIZE: usize = 19;
+#[cfg(test)]
+pub(crate) const RETIREMENT_PENDING: u8 = 0;
+pub(crate) const RETIREMENT_COMPLETE: u8 = 1;
+pub(crate) const WRITE_ENTRY_RETRY_ALARM: u32 = 8;
+
+pub(crate) const MAX_RECOVERABLE_KEY_SIZE_V1: usize =
+    FEOX_BLOCK_SIZE - (SECTOR_HEADER_SIZE + 2 + 8 + 8);
+pub(crate) const MAX_RECOVERABLE_KEY_SIZE: usize =
+    FEOX_BLOCK_SIZE - (SECTOR_HEADER_SIZE + 2 + 8 + 8 + 8);
 
 // Metadata
 pub const FEOX_SIGNATURE: &[u8; 8] = b"FEOX_SIG";
 pub const FEOX_SIGNATURE_SIZE: usize = 8;
 pub const FEOX_METADATA_BLOCK: u64 = 0;
+pub(crate) const FEOX_METADATA_BACKUP_BLOCK: u64 = 7;
 pub const FEOX_METADATA_SIZE: usize = PAGE_SIZE;
 pub const FEOX_DATA_START_BLOCK: u64 = 16;
 pub const FEOX_WRITE_BUFFER_SIZE: usize = 16 * MB;

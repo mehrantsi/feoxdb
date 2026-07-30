@@ -64,13 +64,30 @@ Q: What kind of applications would need this performance? Why these latency numb
      For desktop apps, this means your KV store doesn't tie up threads that the UI needs. For servers, it means handling more users without scaling up.
      The durability tradeoff makes sense when you realize most KV workloads are derived data that can be rebuilt. Why block threads and exhaust IOPS for fsync-level durability on data that doesn't need it?
    
+## Storage Format and Recovery
+
+Persistent stores created by FeOxDB v0.6.0 onwards, use format v3. The format includes checksummed primary and backup metadata, allocation journaling, extent-bound record tokens, and recoverable deletion markers. On open, FeOxDB scans the device to rebuild its indexes and free-space state.
+
+Format v1 and v2 stores open in compatibility mode and continue using their existing record format. Opening a store does not convert it to v3.
+
+Migration is an offline, copy-only operation. The source is opened read-only and records retain their timestamps and absolute TTL expiries. FeOxDB writes a sibling temporary file, reopens and compares it with the recovered source, then publishes it at a destination that must not already exist:
+
+```bash
+cargo install feoxdb --version 0.6.0 --bin feox-migrate
+feox-migrate --source data-v2.feox --destination data-v3.feox
+```
+
+A legacy deletion marker can be ambiguous because it does not contain the deleted extent length. Recovery and migration reject such markers by default. After retaining a backup and reviewing the risk, a trusted store can be migrated with `--allow-ambiguous-legacy-recovery`. This mode may interpret continuation data from a deleted multi-sector record as a live record.
+
+Stop every process using the source before migration. FeOxDB does not convert files in place or overwrite an existing destination. Store-file downgrade compatibility is not guaranteed.
+
 ## Quick Start
 
 ### Installation
 
 ```toml
 [dependencies]
-feoxdb = "0.5.4"
+feoxdb = "0.6.0"
 ```
 
 ### Basic Usage
@@ -114,7 +131,7 @@ fn main() -> feoxdb::Result<()> {
     store.insert(b"config:app", b"production")?;
     
     // Flush to disk
-    store.flush();
+    store.flush()?;
     
     // Data survives restarts
     drop(store);
@@ -187,7 +204,7 @@ fn main() -> feoxdb::Result<()> {
         handles.push(thread::spawn(move || {
             for j in 0..1000 {
                 let key = format!("thread_{}:key_{}", i, j);
-                store_clone.insert(key.as_bytes(), b"value", None).unwrap();
+                store_clone.insert(key.as_bytes(), b"value").unwrap();
             }
         }));
     }

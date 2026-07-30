@@ -22,6 +22,9 @@ pub mod io_tests;
 pub mod metadata_tests;
 
 #[cfg(test)]
+pub mod migration_tests;
+
+#[cfg(test)]
 pub mod json_patch_tests;
 
 #[cfg(test)]
@@ -38,3 +41,9 @@ pub mod persistence_tests;
 
 #[cfg(test)]
 pub mod ttl_tests;
+
+#[cfg(test)]
+pub mod stale_extent_tests;
+
+#[cfg(test)]
+pub mod seq_token_tests;

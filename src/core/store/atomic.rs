@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{BufMut, BytesMut};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -133,159 +133,158 @@ impl FeoxStore {
         timestamp: Option<u64>,
         ttl_seconds: u64,
     ) -> Result<i64> {
-        self.validate_key(key)?;
+        if ttl_seconds > 0 {
+            self.ensure_ttl_write_supported()?;
+        }
+        self.validate_new_key(key)?;
 
         let key_vec = key.to_vec();
+        let explicit_timestamp = timestamp.filter(|timestamp| *timestamp != 0);
+        let mut observed = None;
 
-        let result = match self.hash_table.entry(key_vec.clone()) {
-            scc::hash_map::Entry::Occupied(mut entry) => {
-                let old_record = entry.get();
-
-                // Get timestamp inside the critical section to ensure it's always newer
-                let timestamp = match timestamp {
-                    Some(0) | None => self.get_timestamp(),
-                    Some(ts) => ts,
+        loop {
+            let Some(current) = self.hash_table.read(key, |_, record| Arc::clone(record)) else {
+                let retired_at = observed
+                    .as_ref()
+                    .map_or(0, |record: &Arc<Record>| record.retirement_timestamp());
+                let timestamp = match explicit_timestamp {
+                    Some(timestamp) => timestamp,
+                    None => {
+                        let minimum = retired_at.checked_add(1).ok_or(FeoxError::OlderTimestamp)?;
+                        self.get_timestamp(key).max(minimum)
+                    }
                 };
-
-                // Check if timestamp is valid
-                if timestamp < old_record.timestamp {
+                if timestamp <= retired_at {
                     return Err(FeoxError::OlderTimestamp);
                 }
 
-                // Load value from memory or disk
-                let value = if let Some(val) = old_record.get_value() {
-                    val.to_vec()
-                } else if let Some(value) = self
-                    .cache
-                    .as_ref()
-                    .and_then(|cache| cache.get_for_record(key, old_record))
-                {
-                    value.to_vec()
-                } else {
-                    let value = self.load_value_from_disk(old_record)?;
-                    if let Some(ref cache) = self.cache {
-                        cache.insert_for_record(
-                            key_vec.clone(),
-                            Bytes::from(value.clone()),
-                            Arc::clone(old_record),
+                match self.hash_table.entry(key_vec.clone()) {
+                    scc::hash_map::Entry::Occupied(_) => continue,
+                    scc::hash_map::Entry::Vacant(entry) => {
+                        let record_size = self.calculate_record_size(key.len(), 8);
+                        let reservation = self.reserve_memory(record_size)?;
+                        let new_record =
+                            counter_record(key_vec.clone(), delta, timestamp, ttl_seconds);
+                        let ttl_expiry = new_record.ttl_expiry.load(Ordering::Acquire);
+                        let buffered_record = self
+                            .write_buffer
+                            .as_ref()
+                            .filter(|_| !self.memory_only)
+                            .map(|_| Arc::clone(&new_record));
+                        let entry_guard = entry.insert_entry(Arc::clone(&new_record));
+                        self.insert_into_tree(key_vec.clone(), new_record);
+                        self.observe_published_timestamp(
+                            key,
+                            timestamp,
+                            explicit_timestamp.is_some(),
                         );
+                        reservation.commit();
+                        self.note_ttl_transition(0, ttl_expiry);
+                        self.stats.record_count.fetch_add(1, Ordering::Relaxed);
+                        drop(entry_guard);
+
+                        if let (Some(write_buffer), Some(record)) =
+                            (&self.write_buffer, buffered_record)
+                        {
+                            write_buffer.add_write(Operation::Insert, record, 0)?;
+                        }
+                        return Ok(delta);
                     }
-                    value
-                };
-
-                let current_val = if value.len() == 8 {
-                    let bytes = value
-                        .get(..8)
-                        .and_then(|slice| slice.try_into().ok())
-                        .ok_or(FeoxError::InvalidNumericValue)?;
-                    i64::from_le_bytes(bytes)
-                } else {
-                    return Err(FeoxError::InvalidOperation);
-                };
-
-                let new_val = current_val.saturating_add(delta);
-                let new_value = new_val.to_le_bytes().to_vec();
-
-                // Create new record with TTL if specified
-                let new_record = if ttl_seconds > 0 {
-                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
-                    Arc::new(Record::new_with_timestamp_ttl(
-                        old_record.key.clone(),
-                        new_value,
-                        timestamp,
-                        ttl_expiry,
-                    ))
-                } else {
-                    Arc::new(Record::new(old_record.key.clone(), new_value, timestamp))
-                };
-
-                let old_value_len = old_record.value_len;
-                let old_size = old_record.calculate_size();
-                let new_size = self.calculate_record_size(old_record.key.len(), 8);
-                let old_record_arc = Arc::clone(old_record);
-
-                // Atomically update the entry
-                old_record_arc.refcount.store(0, Ordering::Release);
-                entry.insert(Arc::clone(&new_record));
-
-                // Update skip list as well
-                self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
-
-                // Update memory usage
-                if new_size > old_size {
-                    self.stats
-                        .memory_usage
-                        .fetch_add(new_size - old_size, Ordering::AcqRel);
-                } else {
-                    self.stats
-                        .memory_usage
-                        .fetch_sub(old_size - new_size, Ordering::AcqRel);
                 }
+            };
 
-                // Only do cache and persistence operations if not in memory-only mode
-                if !self.memory_only {
-                    if self.enable_caching {
-                        if let Some(ref cache) = self.cache {
-                            cache.remove(&key_vec);
+            let root = observed.get_or_insert_with(|| Arc::clone(&current));
+            if explicit_timestamp.is_some_and(|timestamp| timestamp <= current.timestamp) {
+                return Err(FeoxError::OlderTimestamp);
+            }
+
+            let expiry = current.ttl_expiry.load(Ordering::Acquire);
+            if self.enable_ttl && expiry > 0 {
+                let now = self.get_timestamp_pub();
+                if now > expiry {
+                    self.retire_expired_if_current(key, &current, now)?;
+                    continue;
+                }
+            }
+
+            let (value, _, source) = match self.resolve_value(key, Arc::clone(&current)) {
+                Ok(resolved) => resolved,
+                Err(FeoxError::KeyNotFound) => {
+                    let now = self.get_timestamp_pub();
+                    self.retire_expired_if_current(key, &current, now)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if value.len() != 8 {
+                return Err(FeoxError::InvalidOperation);
+            }
+            let current_value = i64::from_le_bytes(
+                value
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| FeoxError::InvalidNumericValue)?,
+            );
+            let new_value = current_value.saturating_add(delta);
+            let timestamp = explicit_timestamp.unwrap_or_else(|| self.get_timestamp(key));
+
+            match self.hash_table.entry(key_vec.clone()) {
+                scc::hash_map::Entry::Occupied(mut entry) => {
+                    let old_record = entry.get();
+                    if !Arc::ptr_eq(old_record, &source) {
+                        if explicit_timestamp
+                            .is_some_and(|timestamp| timestamp <= root.retirement_timestamp())
+                        {
+                            return Err(FeoxError::OlderTimestamp);
+                        }
+                        continue;
+                    }
+                    if timestamp <= old_record.timestamp {
+                        return Err(FeoxError::OlderTimestamp);
+                    }
+
+                    let old_size = old_record.calculate_size();
+                    let new_size = self.calculate_record_size(old_record.key.len(), 8);
+                    let reservation = self.reserve_memory(new_size.saturating_sub(old_size))?;
+                    let old_record = Arc::clone(old_record);
+                    let record = counter_record(key_vec.clone(), new_value, timestamp, ttl_seconds);
+                    let old_expiry = old_record.ttl_expiry.load(Ordering::Acquire);
+                    let new_expiry = record.ttl_expiry.load(Ordering::Acquire);
+
+                    old_record.link_successor(&record);
+                    old_record.refcount.store(0, Ordering::Release);
+                    entry.insert(Arc::clone(&record));
+                    self.publish_to_tree(&key_vec, Arc::clone(&record));
+                    self.observe_published_timestamp(key, timestamp, explicit_timestamp.is_some());
+                    reservation.commit();
+                    self.note_ttl_transition(old_expiry, new_expiry);
+                    if old_size > new_size {
+                        self.release_memory(old_size - new_size);
+                    }
+                    drop(entry);
+
+                    if !self.memory_only {
+                        if self.enable_caching {
+                            if let Some(cache) = &self.cache {
+                                cache.remove_for_record(&key_vec, &old_record);
+                            }
+                        }
+
+                        if let Some(write_buffer) = &self.write_buffer {
+                            write_buffer.add_replacement(record, old_record)?;
                         }
                     }
-
-                    if let Some(ref wb) = self.write_buffer {
-                        wb.add_write(Operation::Update, Arc::clone(&new_record), old_value_len)?;
-                        wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
+                    return Ok(new_value);
+                }
+                scc::hash_map::Entry::Vacant(_) => {
+                    if explicit_timestamp
+                        .is_some_and(|timestamp| timestamp <= root.retirement_timestamp())
+                    {
+                        return Err(FeoxError::OlderTimestamp);
                     }
                 }
-
-                Ok(new_val)
             }
-            scc::hash_map::Entry::Vacant(entry) => {
-                // Key doesn't exist, create it with initial value
-                // Get timestamp inside the critical section
-                let timestamp = match timestamp {
-                    Some(0) | None => self.get_timestamp(),
-                    Some(ts) => ts,
-                };
-
-                let initial_val = delta;
-                let value = initial_val.to_le_bytes().to_vec();
-
-                // Create new record with TTL if specified
-                let new_record = if ttl_seconds > 0 {
-                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
-                    Arc::new(Record::new_with_timestamp_ttl(
-                        key_vec.clone(),
-                        value,
-                        timestamp,
-                        ttl_expiry,
-                    ))
-                } else {
-                    Arc::new(Record::new(key_vec.clone(), value, timestamp))
-                };
-
-                let _ = entry.insert_entry(Arc::clone(&new_record));
-
-                // Update skip list
-                self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
-
-                // Update statistics
-                self.stats.record_count.fetch_add(1, Ordering::AcqRel);
-                let record_size = self.calculate_record_size(key.len(), 8);
-                self.stats
-                    .memory_usage
-                    .fetch_add(record_size, Ordering::AcqRel);
-
-                // Handle persistence if needed
-                if !self.memory_only {
-                    if let Some(ref wb) = self.write_buffer {
-                        wb.add_write(Operation::Insert, Arc::clone(&new_record), 0)?;
-                    }
-                }
-
-                Ok(initial_val)
-            }
-        };
-
-        result
+        }
     }
 
     /// Insert a key only when it does not already exist.
@@ -319,29 +318,26 @@ impl FeoxStore {
             scc::hash_map::Entry::Occupied(_) => Ok(false),
             scc::hash_map::Entry::Vacant(entry) => {
                 let record_size = self.calculate_record_size(key.len(), value.len());
-                if !self.check_memory_limit(record_size) {
-                    return Err(FeoxError::OutOfMemory);
-                }
+                let reservation = self.reserve_memory(record_size)?;
 
-                let record = Arc::new(Record::new(
-                    key_vec.clone(),
-                    value.to_vec(),
-                    self.get_timestamp(),
-                ));
-                let _entry = entry.insert_entry(Arc::clone(&record));
+                let timestamp = self.get_timestamp(key);
+                let record = Arc::new(Record::new(key_vec.clone(), value.to_vec(), timestamp));
+                let buffered_record = self
+                    .write_buffer
+                    .as_ref()
+                    .filter(|_| !self.memory_only)
+                    .map(|_| Arc::clone(&record));
+                let entry_guard = entry.insert_entry(Arc::clone(&record));
 
-                self.tree.insert(key_vec, Arc::clone(&record));
-                self.stats.record_count.fetch_add(1, Ordering::AcqRel);
-                self.stats
-                    .memory_usage
-                    .fetch_add(record_size, Ordering::AcqRel);
+                self.insert_into_tree(key_vec, record);
+                reservation.commit();
+                self.stats.record_count.fetch_add(1, Ordering::Relaxed);
+                drop(entry_guard);
                 self.stats
                     .record_insert(start.elapsed().as_nanos() as u64, false);
 
-                if !self.memory_only {
-                    if let Some(ref write_buffer) = self.write_buffer {
-                        write_buffer.add_write(Operation::Insert, record, 0)?;
-                    }
+                if let (Some(write_buffer), Some(record)) = (&self.write_buffer, buffered_record) {
+                    write_buffer.add_write(Operation::Insert, record, 0)?;
                 }
 
                 Ok(true)
@@ -468,84 +464,81 @@ impl FeoxStore {
         timestamp: Option<u64>,
         ttl_seconds: u64,
     ) -> Result<bool> {
+        if ttl_seconds > 0 {
+            self.ensure_ttl_write_supported()?;
+        }
         let start = std::time::Instant::now();
         self.validate_key_value(key, new_value)?;
         let key_vec = key.to_vec();
 
-        // Phase 1: Check value and save record reference for version tracking
         let initial_record = {
-            let entry = match self.hash_table.read(&key_vec, |_, v| v.clone()) {
-                Some(e) => e,
-                None => return Ok(false), // Key doesn't exist
-            };
-
-            let record_arc = entry;
-
-            // Check if value matches expected
-            let value_matches = if let Some(val) = record_arc.get_value() {
-                // Fast path: value in memory
-                val.as_ref() == expected
-            } else if let Some(value) = self
-                .cache
-                .as_ref()
-                .and_then(|cache| cache.get_for_record(key, &record_arc))
+            let record = match self
+                .hash_table
+                .read(&key_vec, |_, record| Arc::clone(record))
             {
-                value.as_ref() == expected
-            } else {
-                let disk_value = self.load_value_from_disk(&record_arc)?;
-                if let Some(ref cache) = self.cache {
-                    cache.insert_for_record(
-                        key_vec.clone(),
-                        Bytes::from(disk_value.clone()),
-                        Arc::clone(&record_arc),
-                    );
-                }
-                disk_value == expected
+                Some(record) => record,
+                None => return Ok(false),
+            };
+            let (value, cache_hit, source) = match self.resolve_value(key, record) {
+                Ok(resolved) => resolved,
+                Err(FeoxError::KeyNotFound | FeoxError::StaleExtent) => return Ok(false),
+                Err(error) => return Err(error),
             };
 
-            if !value_matches {
-                return Ok(false); // Value doesn't match expected
+            if !cache_hit {
+                if let Some(cache) = &self.cache {
+                    cache.insert_for_record(key_vec.clone(), value.clone(), &source);
+                }
             }
-
-            // Return the Arc pointer itself as our version identifier
-            // NOTE: We can't use the stored timestamp for verification here because
-            // SystemTime::now() resolution is 1us, which is too coarse for CAS operations.
-            record_arc
+            if value.as_ref() != expected {
+                return Ok(false);
+            }
+            source
         };
 
-        // Phase 2: Acquire write lock and verify record hasn't changed
-        match self.hash_table.entry(key_vec.clone()) {
+        let timestamp = self.resolve_timestamp(key, timestamp);
+        self.replace_record_if_current(
+            &key_vec,
+            &initial_record,
+            new_value,
+            timestamp,
+            ttl_seconds,
+            start,
+        )
+    }
+
+    pub(super) fn replace_record_if_current(
+        &self,
+        key: &[u8],
+        expected: &Arc<Record>,
+        new_value: &[u8],
+        timestamp: (u64, bool),
+        ttl_seconds: u64,
+        start: std::time::Instant,
+    ) -> Result<bool> {
+        let (timestamp, explicit_timestamp) = timestamp;
+        match self.hash_table.entry(key.to_vec()) {
             scc::hash_map::Entry::Occupied(mut entry) => {
                 let old_record = entry.get();
 
-                // Check if the record is still the same one we read earlier
-                if !Arc::ptr_eq(old_record, &initial_record) {
-                    // Record was modified between our check and acquiring lock
+                if !Arc::ptr_eq(old_record, expected) {
                     return Ok(false);
                 }
 
-                let timestamp = match timestamp {
-                    Some(0) | None => self.get_timestamp(),
-                    Some(ts) => ts,
-                };
-
-                if timestamp < old_record.timestamp {
+                if timestamp <= old_record.timestamp {
                     return Err(FeoxError::OlderTimestamp);
                 }
 
                 let old_size = old_record.calculate_size();
                 let new_size = self.calculate_record_size(key.len(), new_value.len());
-                let old_value_len = old_record.value_len;
+                let reservation = self.reserve_memory(new_size.saturating_sub(old_size))?;
                 let old_record_arc = Arc::clone(old_record);
-
-                // Pre-check memory limit
-                if new_size > old_size && !self.check_memory_limit(new_size - old_size) {
-                    return Err(FeoxError::OutOfMemory);
-                }
+                let old_expiry = old_record_arc.ttl_expiry.load(Ordering::Acquire);
 
                 // Create new record with TTL if specified
                 let new_record = if ttl_seconds > 0 {
-                    let ttl_expiry = timestamp + (ttl_seconds * 1_000_000_000); // Convert to nanoseconds
+                    let ttl_expiry =
+                        timestamp.saturating_add(ttl_seconds.saturating_mul(1_000_000_000));
                     Arc::new(Record::new_with_timestamp_ttl(
                         key.to_vec(),
                         new_value.to_vec(),
@@ -556,20 +549,17 @@ impl FeoxStore {
                     Arc::new(Record::new(key.to_vec(), new_value.to_vec(), timestamp))
                 };
 
+                old_record_arc.link_successor(&new_record);
                 old_record_arc.refcount.store(0, Ordering::Release);
                 entry.insert(Arc::clone(&new_record));
-
-                self.tree.insert(key_vec.clone(), Arc::clone(&new_record));
-
-                if new_size > old_size {
-                    self.stats
-                        .memory_usage
-                        .fetch_add(new_size - old_size, Ordering::AcqRel);
-                } else {
-                    self.stats
-                        .memory_usage
-                        .fetch_sub(old_size - new_size, Ordering::AcqRel);
+                self.publish_to_tree(key, Arc::clone(&new_record));
+                self.observe_published_timestamp(key, timestamp, explicit_timestamp);
+                reservation.commit();
+                self.note_ttl_transition(old_expiry, new_record.ttl_expiry.load(Ordering::Acquire));
+                if old_size > new_size {
+                    self.release_memory(old_size - new_size);
                 }
+                drop(entry);
 
                 self.stats
                     .record_insert(start.elapsed().as_nanos() as u64, true);
@@ -577,13 +567,12 @@ impl FeoxStore {
                 if !self.memory_only {
                     if self.enable_caching {
                         if let Some(ref cache) = self.cache {
-                            cache.remove(&key_vec);
+                            cache.remove_for_record(key, &old_record_arc);
                         }
                     }
 
                     if let Some(ref wb) = self.write_buffer {
-                        wb.add_write(Operation::Update, new_record, old_value_len)?;
-                        wb.add_write(Operation::Delete, old_record_arc, old_value_len)?;
+                        wb.add_replacement(new_record, old_record_arc)?;
                     }
                 }
 
@@ -591,5 +580,22 @@ impl FeoxStore {
             }
             scc::hash_map::Entry::Vacant(_) => Ok(false),
         }
+    }
+}
+
+fn counter_record(key: Vec<u8>, value: i64, timestamp: u64, ttl_seconds: u64) -> Arc<Record> {
+    let mut bytes = BytesMut::with_capacity(std::mem::size_of::<i64>());
+    bytes.put_i64_le(value);
+    let value = bytes.freeze();
+
+    if ttl_seconds > 0 {
+        Arc::new(Record::new_from_bytes_with_ttl(
+            key,
+            value,
+            timestamp,
+            timestamp.saturating_add(ttl_seconds.saturating_mul(1_000_000_000)),
+        ))
+    } else {
+        Arc::new(Record::new_from_bytes(key, value, timestamp))
     }
 }

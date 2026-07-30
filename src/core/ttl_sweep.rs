@@ -3,7 +3,6 @@ use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use rand::rngs::ThreadRng;
 use rand::Rng;
 
 use crate::constants::Operation;
@@ -134,7 +133,9 @@ impl TtlSweeper {
         self.shutdown.store(true, Ordering::Release);
 
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if handle.thread().id() != thread::current().id() {
+                let _ = handle.join();
+            }
         }
     }
 
@@ -241,35 +242,50 @@ fn run_sweeper_loop(
 /// Sample keys and expire those that have exceeded their TTL
 fn sample_and_expire_batch(store: &Arc<FeoxStore>, config: &TtlConfig) -> (u64, u64) {
     let now = store.get_timestamp_pub();
-    let mut sampled = 0;
     let mut expired = 0;
     let mut rng = rand::rng();
 
     // Get access to the hash table
     let hash_table = store.get_hash_table();
 
-    // Sample random entries directly from the hash table
-    for _ in 0..config.sample_size {
-        // Try to get a random entry with TTL
-        if let Some((key, record)) = get_random_ttl_entry(hash_table, &mut rng) {
-            sampled += 1;
+    let candidates = sample_ttl_entries(hash_table, config.sample_size, &mut rng);
+    let sampled = candidates.len() as u64;
 
-            let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
+    for (key, record) in candidates {
+        let ttl_expiry = record.ttl_expiry.load(Ordering::Relaxed);
 
-            // Check if expired
-            if ttl_expiry > 0 && ttl_expiry < now {
-                // Remove expired entry
-                hash_table.remove(&key);
-                store.remove_from_tree(&key);
+        if ttl_expiry > 0 && ttl_expiry < now {
+            #[cfg(test)]
+            crate::test_hooks::pause_at(crate::test_hooks::TTL_AFTER_EXPIRED_SAMPLE);
 
+            let old_value_len = record.value_len;
+            let record_size = record.calculate_size();
+            let retired = match hash_table.entry(key.clone()) {
+                scc::hash_map::Entry::Occupied(entry) => {
+                    let current_expiry = record.ttl_expiry.load(Ordering::Acquire);
+                    if Arc::ptr_eq(entry.get(), &record)
+                        && current_expiry > 0
+                        && current_expiry < now
+                    {
+                        record.retired_at.store(now, Ordering::Release);
+                        record.refcount.store(0, Ordering::Release);
+                        store.remove_from_tree(&key);
+                        let _ = entry.remove();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                scc::hash_map::Entry::Vacant(_) => false,
+            };
+
+            if retired {
+                store.remove_cached(&key, &record);
+                store.note_expired_record(record_size);
                 expired += 1;
 
-                // Queue disk cleanup if needed
-                if record.sector.load(Ordering::Relaxed) > 0 {
-                    // Add to write buffer for disk cleanup
-                    if let Some(wb) = store.get_write_buffer() {
-                        let _ = wb.add_write(Operation::Delete, record, 0);
-                    }
+                if let Some(wb) = store.get_write_buffer() {
+                    let _ = wb.add_write(Operation::Delete, record, old_value_len);
                 }
             }
         }
@@ -278,31 +294,54 @@ fn sample_and_expire_batch(store: &Arc<FeoxStore>, config: &TtlConfig) -> (u64, 
     (sampled, expired)
 }
 
-/// Get a random entry with TTL using sampling
-fn get_random_ttl_entry(
+#[cfg(test)]
+pub(crate) fn sample_and_expire_for_test(store: &Arc<FeoxStore>) -> (u64, u64) {
+    sample_and_expire_batch(
+        store,
+        &TtlConfig {
+            sample_size: 1,
+            ..TtlConfig::default()
+        },
+    )
+}
+
+fn sample_ttl_entries<R: Rng + ?Sized>(
     hash_table: &scc::HashMap<Vec<u8>, Arc<crate::core::record::Record>, ahash::RandomState>,
-    rng: &mut ThreadRng,
-) -> Option<(Vec<u8>, Arc<crate::core::record::Record>)> {
-    // Sample up to 100 entries and pick one with TTL
-    let mut candidates = Vec::new();
-    let mut count = 0;
+    sample_size: usize,
+    rng: &mut R,
+) -> Vec<(Vec<u8>, Arc<crate::core::record::Record>)> {
+    if sample_size == 0 {
+        return Vec::new();
+    }
 
+    let mut candidates = Vec::with_capacity(sample_size.min(hash_table.len()));
+    let mut seen = 0usize;
     hash_table.scan(|key: &Vec<u8>, value: &Arc<crate::core::record::Record>| {
-        if count >= 100 {
-            return; // Stop iteration
-        }
-        count += 1;
-
         if value.ttl_expiry.load(Ordering::Relaxed) > 0 {
-            candidates.push((key.clone(), value.clone()));
+            seen += 1;
+            if candidates.len() < sample_size {
+                candidates.push((key.clone(), Arc::clone(value)));
+            } else {
+                let index = rng.random_range(0..seen);
+                if index < sample_size {
+                    candidates[index] = (key.clone(), Arc::clone(value));
+                }
+            }
         }
     });
 
-    if candidates.is_empty() {
-        None
-    } else {
-        // Pick a random candidate
-        let idx = rng.random_range(0..candidates.len());
-        Some(candidates.into_iter().nth(idx).unwrap())
-    }
+    candidates
 }
+
+#[cfg(test)]
+pub(crate) fn sample_ttl_keys_for_test(store: &FeoxStore, sample_size: usize) -> Vec<Vec<u8>> {
+    let mut rng = rand::rng();
+    sample_ttl_entries(store.get_hash_table(), sample_size, &mut rng)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "../tests/ttl_sweep_safety_tests.rs"]
+mod tests;

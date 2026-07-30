@@ -46,6 +46,7 @@ pub struct StoreBuilder {
     enable_caching: Option<bool>,
     enable_ttl: bool,
     ttl_config: Option<TtlConfig>,
+    allow_ambiguous_legacy_recovery: bool,
 }
 
 impl StoreBuilder {
@@ -58,6 +59,7 @@ impl StoreBuilder {
             enable_caching: None, // Disable caching for memory-only mode
             enable_ttl: false,
             ttl_config: None,
+            allow_ambiguous_legacy_recovery: false,
         }
     }
 
@@ -67,6 +69,16 @@ impl StoreBuilder {
     /// If not set, the store operates in memory-only mode.
     pub fn device_path(mut self, path: impl Into<String>) -> Self {
         self.device_path = Some(path.into());
+        self
+    }
+
+    /// Allow recovery past a released v1/v2 deletion marker.
+    ///
+    /// Those formats did not store the deleted extent length, so a continuation
+    /// block can be indistinguishable from a record head. This opt-in preserves
+    /// their historical skip-one behavior for trusted stores or migration.
+    pub fn allow_ambiguous_legacy_recovery(mut self, allow: bool) -> Self {
+        self.allow_ambiguous_legacy_recovery = allow;
         self
     }
 
@@ -198,7 +210,7 @@ impl StoreBuilder {
             ttl_config: self.ttl_config,
         };
 
-        FeoxStore::with_config(config)
+        FeoxStore::with_config_and_legacy_recovery(config, self.allow_ambiguous_legacy_recovery)
     }
 }
 
