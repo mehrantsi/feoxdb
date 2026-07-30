@@ -3,6 +3,7 @@ use crate::storage::format::retirement_marker_token;
 use crate::storage::io::DiskIO;
 use crate::storage::metadata::Metadata;
 use bytes::Bytes;
+#[cfg(unix)]
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 

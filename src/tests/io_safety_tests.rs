@@ -51,8 +51,9 @@ fn only_completed_and_unqueued_buffers_are_released() {
 
 #[test]
 fn completion_validation_rejects_errors_and_short_writes() {
-    let kernel_error = validate_write_completion(-libc::EIO, 4096).unwrap_err();
-    assert_eq!(kernel_error.raw_os_error(), Some(libc::EIO));
+    let raw_error = 5;
+    let kernel_error = validate_write_completion(-raw_error, 4096).unwrap_err();
+    assert_eq!(kernel_error.raw_os_error(), Some(raw_error));
 
     let short_write = validate_write_completion(2048, 4096).unwrap_err();
     assert_eq!(short_write.kind(), io::ErrorKind::WriteZero);

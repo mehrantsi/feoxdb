@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::storage::allocation_journal::{
     decode as decode_allocation_journal, ALLOCATION_JOURNAL_BLOCKS, ALLOCATION_JOURNAL_START_BLOCK,
 };
